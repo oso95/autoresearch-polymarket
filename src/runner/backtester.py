@@ -63,6 +63,30 @@ def split_train_test(rounds: list[dict], train_ratio: float = 0.7) -> tuple[list
     return rounds[:split_idx], rounds[split_idx:]
 
 
+def walk_forward_splits(rounds: list[dict], train_size: int = 40, test_size: int = 15, step: int = 10) -> list[tuple[list[dict], list[dict]]]:
+    """Generate walk-forward validation splits.
+
+    Slides a window through the data:
+      Split 1: train=[0..39], test=[40..54]
+      Split 2: train=[10..49], test=[50..64]
+      Split 3: train=[20..59], test=[60..74]
+      ...
+
+    This tests whether the strategy works across different market regimes,
+    not just one specific period.
+
+    Returns list of (train, test) tuples.
+    """
+    splits = []
+    i = 0
+    while i + train_size + test_size <= len(rounds):
+        train = rounds[i:i + train_size]
+        test = rounds[i + train_size:i + train_size + test_size]
+        splits.append((train, test))
+        i += step
+    return splits
+
+
 def trim_snapshot(snapshot: dict) -> dict:
     """Trim snapshot to reduce token usage (same as live system)."""
     if "binance_candles_5m" in snapshot:

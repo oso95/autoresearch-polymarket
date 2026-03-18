@@ -26,7 +26,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from src.runner.backtester import Backtester, load_historical_rounds, split_train_test
+from src.runner.backtester import Backtester, load_historical_rounds, split_train_test, walk_forward_splits
 from src.runner.agent_runner import AgentRunner
 
 logging.basicConfig(
@@ -42,6 +42,8 @@ async def main():
     parser.add_argument("--agents", nargs="*", help="Specific agents to test (default: all)")
     parser.add_argument("--split", type=float, default=0.0,
                         help="Train/test split ratio (e.g., 0.7 = 70%% train, 30%% test). 0 = no split.")
+    parser.add_argument("--walk-forward", action="store_true",
+                        help="Use walk-forward validation (multiple rolling train/test splits)")
     parser.add_argument("--model", default=None,
                         help="Override model for all agents (haiku, sonnet, opus)")
     parser.add_argument("--concurrency", type=int, default=10,
@@ -92,7 +94,59 @@ async def main():
         batch_size=args.batch_size,
     )
 
-    if args.split > 0:
+    if args.walk_forward:
+        # Walk-forward validation: multiple rolling train/test splits
+        splits = walk_forward_splits(rounds)
+        if not splits:
+            print("ERROR: Not enough rounds for walk-forward validation (need 55+)")
+            sys.exit(1)
+
+        print(f"\nWalk-forward: {len(splits)} splits (train=40, test=15, step=10)")
+
+        # Track per-agent average win rate across all test windows
+        agent_test_wrs: dict[str, list[float]] = {name: [] for name in agent_names}
+
+        for split_idx, (train, test) in enumerate(splits):
+            print(f"\n--- Split {split_idx + 1}/{len(splits)}: train[{train[0]['timestamp']}..{train[-1]['timestamp']}] test[{test[0]['timestamp']}..{test[-1]['timestamp']}] ---")
+            test_results = await bt.backtest_all(agent_names, test, args.agent_concurrency)
+            for r in test_results:
+                if "error" not in r and r["agent"] in agent_test_wrs:
+                    agent_test_wrs[r["agent"]].append(r["win_rate"])
+
+        # Summary: average test WR across all windows
+        print(f"\n{'=' * 80}")
+        print(f"  WALK-FORWARD RESULTS (avg test WR across {len(splits)} windows)")
+        print(f"{'=' * 80}")
+        print(f"{'Agent':<50} {'Avg WR':>7} {'Min':>6} {'Max':>6} {'StdDev':>7} {'Windows':>8}")
+        print(f"{'-' * 50} {'-' * 7} {'-' * 6} {'-' * 6} {'-' * 7} {'-' * 8}")
+
+        agent_summaries = []
+        for name in agent_names:
+            wrs = agent_test_wrs[name]
+            if not wrs:
+                continue
+            import statistics
+            avg = statistics.mean(wrs)
+            mn = min(wrs)
+            mx = max(wrs)
+            std = statistics.stdev(wrs) if len(wrs) > 1 else 0
+            agent_summaries.append((name, avg, mn, mx, std, len(wrs)))
+
+        agent_summaries.sort(key=lambda x: x[1], reverse=True)
+        for name, avg, mn, mx, std, n in agent_summaries:
+            flag = " *** INCONSISTENT" if std > 0.20 else ""
+            print(f"{name:<50} {avg:>6.1%} {mn:>5.1%} {mx:>5.1%} {std:>6.1%} {n:>8}{flag}")
+
+        output = args.output or os.path.join(data_dir, "backtest-results-walkforward.json")
+        with open(output, "w") as f:
+            json.dump({
+                "type": "walk-forward",
+                "splits": len(splits),
+                "agents": [{"agent": s[0], "avg_wr": s[1], "min_wr": s[2], "max_wr": s[3], "std": s[4]} for s in agent_summaries],
+            }, f, indent=2)
+        print(f"\nResults saved to {output}")
+
+    elif args.split > 0:
         # Train/test split
         train_rounds, test_rounds = split_train_test(rounds, args.split)
         print(f"\nTrain/test split: {len(train_rounds)} train, {len(test_rounds)} test")
