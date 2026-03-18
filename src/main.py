@@ -337,7 +337,6 @@ async def _orchestration_loop(
     rounds_since_tournament = 0
     rounds_since_evolution = 0
     rounds_since_cleanup = 0
-    pending_score: int | None = None
 
     logger.info("Orchestration loop started, waiting for data layer...")
 
@@ -358,31 +357,29 @@ async def _orchestration_loop(
                     market = json.load(f)
                 updated_at = market.get("updated_at", 0)
 
-                # Detect new round by checking for new round directories
+                # Detect rounds and score/invoke
                 rounds_dir = os.path.join(data_dir, "rounds")
                 if os.path.isdir(rounds_dir):
-                    round_dirs = sorted(
-                        [d for d in os.listdir(rounds_dir) if d.isdigit()],
-                        key=int, reverse=True
+                    all_rounds = sorted(
+                        [int(d) for d in os.listdir(rounds_dir) if d.isdigit()]
                     )
-                    if round_dirs:
-                        latest_round = int(round_dirs[0])
 
-                        # Score previous round after enough time has passed (5+ min)
-                        if pending_score is not None:
-                            age = time.time() - pending_score
-                            if age >= 300:  # 5 minutes since round opened
-                                await _score_round(pending_score, data_dir, runner, fast_fail, agents_dir)
-                                rounds_since_tournament += 1
-                                rounds_since_evolution += 1
-                                rounds_since_cleanup += 1
-                                pending_score = None
+                    # Score ALL rounds that are old enough and haven't been scored
+                    now = time.time()
+                    for round_ts in all_rounds:
+                        age = now - round_ts
+                        result_path = os.path.join(data_dir, "rounds", str(round_ts), "result.json")
+                        if age >= 300 and not os.path.exists(result_path):
+                            await _score_round(round_ts, data_dir, runner, fast_fail, agents_dir)
+                            rounds_since_tournament += 1
+                            rounds_since_evolution += 1
+                            rounds_since_cleanup += 1
 
-                        # New round detected
+                    # Invoke agents for the latest round (if new)
+                    if all_rounds:
+                        latest_round = all_rounds[-1]
                         if latest_round != last_round:
                             last_round = latest_round
-
-                            # Check data layer health (use heartbeat, not status.json)
                             if not monitor.is_data_layer_healthy():
                                 logger.warning(f"Data layer unhealthy, skipping round {latest_round}")
                             else:
@@ -390,7 +387,6 @@ async def _orchestration_loop(
                                     latest_round, data_dir, agents_dir,
                                     runner, predictor, fast_fail, config,
                                 )
-                                pending_score = latest_round
 
             # Run strategy evolution every K rounds (autoresearch inner loop)
             if rounds_since_evolution >= config.evaluation_window_rounds:
