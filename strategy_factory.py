@@ -180,25 +180,24 @@ async def run_factory_cycle(cycle_num: int):
     else:
         logger.info("  No agents need evolution this cycle")
 
-    # Phase 4: EVOLVE — evolve underperformers (no backtest validation during evolve
-    # to avoid rate-limiting conflicts with the live system — the live system will
-    # validate via actual rounds, and the next factory cycle will backtest)
+    # Phase 4: EVOLVE — evolve underperformers in PARALLEL
     if evolve_targets:
-        logger.info(f"Phase 4: EVOLVE — evolving {min(len(evolve_targets), 3)} worst agents")
+        targets = evolve_targets[:3]
+        logger.info(f"Phase 4: EVOLVE — evolving {len(targets)} agents in parallel")
         evolver = StrategyEvolver(AGENTS_DIR, DATA_DIR, timeout_seconds=240)
 
-        for s in evolve_targets[:3]:  # Max 3 agents per cycle
+        async def _evolve_one(s):
             agent_name = s["name"]
             logger.info(f"  Evolving {agent_name} ({s['win_rate']:.1%})...")
-
             result = await evolver.evolve_agent(agent_name)
             if not result:
                 logger.warning(f"    Evolution failed for {agent_name}")
-                continue
-
+                return
             evolver.apply_evolution(agent_name, result)
             change = result.get("change_description", "unknown")
-            logger.info(f"    Evolved: {change[:80]}")
+            logger.info(f"    Evolved {agent_name}: {change[:80]}")
+
+        await asyncio.gather(*[_evolve_one(s) for s in targets], return_exceptions=True)
 
     # Phase 5: PRUNE — mirror anti-predictive, retire hopeless
     logger.info("Phase 5: PRUNE — checking for mirrors and retirements")
