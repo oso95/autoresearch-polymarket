@@ -252,8 +252,44 @@ async def run_factory_cycle(cycle_num: int):
 
     logger.info(f"  {total_agents} agents after pruning")
 
-    # Phase 6: SUMMARY
+    # Phase 6: UPDATE INSIGHTS — refresh tournament-insights.md with latest data
+    logger.info("Phase 6: UPDATE — refreshing shared insights")
+    _update_tournament_insights(stats, rounds)
+
+    # Phase 7: SUMMARY
     logger.info(f"\n  Cycle #{cycle_num} complete. Next cycle in {CYCLE_INTERVAL_SECONDS//60} minutes.")
+
+
+def _update_tournament_insights(stats: list[dict], rounds: list[dict]):
+    """Auto-update tournament-insights.md with latest leaderboard data."""
+    proven = sorted(
+        [s for s in stats if s["rounds"] >= 20],
+        key=lambda s: s["win_rate"],
+        reverse=True,
+    )
+    if not proven:
+        return
+
+    # Only update the performance tiers section (append current snapshot)
+    insights_path = os.path.join(SHARED_DIR, "tournament-insights.md")
+    if not os.path.exists(insights_path):
+        return
+
+    # Write a timestamped snapshot to shared knowledge
+    import time as _time
+    ts = _time.strftime("%Y%m%d-%H%M")
+    snapshot_path = os.path.join(SHARED_DIR, f"leaderboard-snapshot-{ts}.md")
+    if os.path.exists(snapshot_path):
+        return  # Already written this minute
+
+    lines = [f"# Leaderboard Snapshot — {ts} ({len(rounds)} rounds)\n"]
+    for s in proven:
+        tier = "T1" if s["win_rate"] > 0.55 else "T2" if s["win_rate"] > 0.50 else "T3" if s["win_rate"] > 0.45 else "T4"
+        lines.append(f"- [{tier}] {s['name']}: {s['win_rate']:.1%} ({s['rounds']}r)")
+
+    with open(snapshot_path, "w") as f:
+        f.write("\n".join(lines))
+    logger.info(f"  Written leaderboard snapshot to {snapshot_path}")
 
 
 async def main():
