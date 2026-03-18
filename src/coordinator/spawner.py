@@ -424,6 +424,246 @@ behavioral patterns (sleep, mood, risk appetite). These subtle biases
 compound across millions of traders.
 """,
     },
+    {
+        "name": "funding-rate-velocity",
+        "strategy": """# Funding Rate Velocity
+
+## Focus
+Trade based on the RATE OF CHANGE of funding rate, not the absolute level.
+A fresh spike is an imminent squeeze signal. A stale extreme is already priced in.
+
+## Data Sources
+- Primary: `polling/funding_rate` (last 5 readings — need at least 2 to compute velocity)
+- Secondary: `binance_candles_5m` (confirmation)
+- Tertiary: `polling/taker_volume` (confirmation)
+
+## Decision Logic
+1. Compute funding rate velocity:
+   - Read last 2-5 funding rate readings from polling data
+   - velocity = (latest_rate - previous_rate) / time_delta
+   - If only 1 reading available, treat as unknown velocity
+
+2. FRESH SPIKE (high velocity, just changed):
+   - Funding rate moved from near-zero to extreme (|rate| > 5e-5) in last 1-2 readings
+   - This means leveraged positions JUST became extreme → squeeze is imminent
+   - If rate spiked POSITIVE (longs overleveraged) → predict DOWN squeeze, confidence 75%
+   - If rate spiked NEGATIVE (shorts overleveraged) → predict UP squeeze, confidence 75%
+
+3. STALE EXTREME (low velocity, been extreme for a while):
+   - Funding rate has been extreme (|rate| > 5e-5) for 3+ consecutive readings
+   - The market has already adjusted to this — signal is priced in
+   - IGNORE funding rate, fall back to SMA mean reversion instead
+   - Use 20-candle SMA deviation: price > SMA + 0.20% → DOWN, < SMA - 0.20% → UP
+
+4. ACCELERATING (velocity increasing):
+   - Funding rate is extreme AND getting MORE extreme
+   - This is the strongest signal — squeeze pressure is BUILDING
+   - Predict opposite of funding direction, confidence 80%
+
+5. DECELERATING (velocity decreasing, returning to normal):
+   - Funding rate was extreme but is moving back toward zero
+   - Squeeze is already happening or resolved
+   - Follow the current price momentum (last 2 candles direction), confidence 55%
+
+## Confidence
+- Accelerating extreme: 80%
+- Fresh spike: 75%
+- Decelerating: 55%
+- Stale extreme (fallback to SMA): 60%
+- No clear signal: 50%
+
+## Philosophy
+Timing matters more than magnitude. The first candle after a funding rate spike
+is 10x more informative than the 20th candle. Most agents treat all extremes
+equally — this strategy exploits the temporal decay of the signal.
+""",
+    },
+    {
+        "name": "second-order-contrarian",
+        "strategy": """# Second-Order Contrarian (Meta-Agent)
+
+## Focus
+When all the contrarian agents agree, THEY become the crowd. Fade the faders.
+This strategy reads other agents' recent predictions and bets against consensus
+among contrarian strategies.
+
+## Data Sources
+- Primary: Other agents' recent predictions (from shared knowledge / notes)
+- Secondary: `polymarket_orderbook` (market consensus as baseline)
+- Tertiary: `binance_candles_5m` (tiebreaker)
+
+## Decision Logic
+1. Assess agent consensus:
+   - From shared knowledge and notes, identify what most agents predicted last round
+   - If this info is unavailable, skip to step 3
+
+2. Agent herding detection:
+   - If >75% of agents predicted UP last round → agents are herding bullish
+     → Predict DOWN (fade the faders), confidence 65%
+   - If >75% of agents predicted DOWN last round → agents are herding bearish
+     → Predict UP (fade the faders), confidence 65%
+   - If agents are split (no clear consensus) → agents are diverse
+     → This signal is neutral, go to step 3
+
+3. Market consensus (fallback):
+   - Read Polymarket midpoint probability
+   - If Up probability > 65% → market consensus is bullish
+     → Check if last round's outcome was UP:
+       - If YES (consensus was right): predict UP continuation, confidence 55%
+       - If NO (consensus was wrong): predict DOWN (double-fade), confidence 65%
+   - If Down probability > 65% → mirror logic
+   - If near 50/50 → use last 3 candle mean reversion
+
+4. Contrarian fatigue detection:
+   - If contrarian agents have been WRONG for 3+ consecutive rounds
+     → The market is genuinely trending, not mean-reverting
+     → Follow momentum (last 2 candle direction), confidence 60%
+   - This prevents the second-order contrarian from fighting real trends
+
+## Confidence
+- Strong agent herding (>80% agreement) + market consensus alignment: 70%
+- Agent herding alone: 65%
+- Contrarian fatigue (follow trend): 60%
+- No agent data, fallback to market: 55%
+- No clear signal: 50%
+
+## Philosophy
+First-order contrarians fade the market. Second-order contrarians fade the
+contrarians. In a tournament where most agents are contrarian (as ours is),
+this meta-strategy captures the edge when contrarian thinking itself becomes
+the consensus. The key insight: when ALL smart agents agree, they're probably
+all reading the same signals the same way — and the market has already adjusted.
+""",
+    },
+    {
+        "name": "trade-size-distribution",
+        "strategy": """# Trade Size Distribution
+
+## Focus
+Analyze individual trade sizes to distinguish retail noise from institutional flow.
+Many small trades = retail panic/greed = mean reversion is reliable.
+Few large trades = institutional positioning = trend might continue.
+
+## Data Sources
+- Primary: `binance_trades_recent` (individual trade records with quantity and price)
+- Secondary: `binance_candles_5m` (for mean reversion calculation)
+- Tertiary: `polling/taker_volume` (aggregate confirmation)
+
+## Decision Logic
+1. Analyze trade size distribution from recent trades:
+   - Calculate median trade size from last 50 trades
+   - Calculate mean trade size
+   - Count "large trades" (> 3x median size)
+   - Count "small trades" (< 0.5x median size)
+   - Compute ratio: large_count / total_count
+
+2. RETAIL REGIME (large_ratio < 0.10, mostly small trades):
+   - Market is dominated by retail traders
+   - These participants are emotional and reactive
+   - Mean reversion is HIGHLY reliable in this regime
+   - Calculate 20-SMA deviation:
+     - Price > SMA + 0.15% → predict DOWN, confidence 72%
+     - Price < SMA - 0.15% → predict UP, confidence 72%
+   - Lower threshold than normal (0.15% vs 0.20%) because retail noise reverts faster
+
+3. INSTITUTIONAL REGIME (large_ratio > 0.25, many large trades):
+   - Large players are positioning — they have information or conviction
+   - Mean reversion is UNRELIABLE — trend might continue
+   - Check direction of large trades:
+     - If large trades are mostly BUYS (buyer-initiated) → predict UP, confidence 62%
+     - If large trades are mostly SELLS → predict DOWN, confidence 62%
+   - Do NOT apply contrarian logic here — institutions are often right
+
+4. MIXED REGIME (0.10 < large_ratio < 0.25):
+   - Normal market conditions
+   - Fall back to standard contrarian taker flow:
+     - Taker buy/sell < 0.70 → predict UP (contrarian)
+     - Taker buy/sell > 1.30 → predict DOWN (contrarian)
+   - Confidence 60%
+
+5. Volume surge detection:
+   - If total trade count in recent data is > 2x the candle average volume
+   - AND most are small trades → retail FOMO/panic → STRONG mean reversion signal
+   - Increase confidence by 10%
+
+## Confidence
+- Retail regime + strong SMA deviation: 72%
+- Institutional regime + clear direction: 62%
+- Mixed regime: 60%
+- Retail + volume surge: 80%
+- No clear signal: 50%
+
+## Philosophy
+Not all volume is equal. $10M from 10,000 retail traders means something
+completely different from $10M from 3 institutional orders. By separating
+WHO is trading, we know WHEN to trust contrarian signals and when to step aside.
+""",
+    },
+    {
+        "name": "volatility-compression",
+        "strategy": """# Volatility Compression → Expansion
+
+## Focus
+Detect periods of unusually low volatility (tight candle ranges) that precede
+explosive moves. Predict the direction of the breakout using order flow signals
+accumulated during the compression.
+
+## Data Sources
+- Primary: `binance_candles_5m` (candle body sizes for compression detection)
+- Secondary: `polling/taker_volume` (flow direction during compression)
+- Tertiary: `binance_orderbook` (bid/ask pressure during compression)
+
+## Decision Logic
+1. Detect volatility compression:
+   - Calculate candle body size (|close - open|) for last 5 candles
+   - Calculate average body size for last 20 candles
+   - If last 3+ consecutive candles have body < 40% of the 20-candle average body
+     → COMPRESSION DETECTED
+   - Alternative: if last 3 candles all have body < 0.05% of price → compressed
+
+2. During COMPRESSION (coiling phase):
+   - The market is building energy — the next significant candle will be large
+   - Analyze the "hidden flow" during compression:
+     a. Taker flow direction: are buyers or sellers slightly dominant?
+        - Taker ratio < 0.85 during compression → sellers accumulating → breakout likely DOWN
+        - Taker ratio > 1.15 during compression → buyers accumulating → breakout likely UP
+     b. Order book pressure: which side is building?
+        - Bid depth growing relative to ask → institutional buying → UP
+        - Ask depth growing relative to bid → institutional selling → DOWN
+     c. Combine: if taker and order book agree → HIGH confidence breakout direction
+
+3. During EXPANSION (breakout phase):
+   - If last candle was large (body > 1.5x average) after compression
+   - The breakout has started — predict CONTINUATION for one more candle
+   - Confidence 65% (breakouts often have follow-through)
+
+4. NO COMPRESSION (normal volatility):
+   - Fall back to standard mean reversion:
+     - Price > 20-SMA + 0.20% → DOWN
+     - Price < 20-SMA - 0.20% → UP
+   - Confidence 58%
+
+5. FALSE BREAKOUT detection:
+   - If compression breakout happened but REVERSED within the same candle
+     (long wick, small body) → the breakout failed
+   - Predict opposite of the failed breakout direction, confidence 68%
+
+## Confidence
+- Compression + taker/OB agreement: 72%
+- Compression + single signal: 62%
+- Post-compression continuation: 65%
+- False breakout reversal: 68%
+- Normal (no compression): 58%
+- No clear signal: 50%
+
+## Philosophy
+Volatility is cyclical — compression always precedes expansion. While other
+agents focus on WHERE price is (deviation from mean), this strategy focuses
+on HOW price is moving (tight vs loose). The compressed spring metaphor:
+the tighter it coils, the more explosive the release. The trick is reading
+the hidden order flow during the quiet period to predict which way it breaks.
+""",
+    },
 ]
 
 
