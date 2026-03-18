@@ -211,6 +211,9 @@ def _parse_evolution_response(response: str) -> dict | None:
 
 
 class StrategyEvolver:
+    # Use sonnet for evolution — needs reasoning but shouldn't be too slow
+    EVOLUTION_MODEL = "sonnet"
+
     def __init__(self, agents_dir: str, data_dir: str, timeout_seconds: int = 120):
         self.agents_dir = agents_dir
         self.data_dir = data_dir
@@ -252,6 +255,15 @@ class StrategyEvolver:
             with open(notes_path) as f:
                 notes = f.read()
 
+        # Read shared knowledge
+        shared_knowledge_dir = os.path.join(self.data_dir, "shared_knowledge")
+        if os.path.isdir(shared_knowledge_dir):
+            for fname in sorted(os.listdir(shared_knowledge_dir)):
+                fpath = os.path.join(shared_knowledge_dir, fname)
+                if os.path.isfile(fpath) and fname.endswith((".md", ".txt")):
+                    with open(fpath) as f:
+                        notes += f"\n\n## Shared Knowledge: {fname}\n{f.read()}"
+
         # Build context
         shared_summary = _build_shared_ledger_summary(self.agents_dir, agent_name)
         lb_summary = _build_leaderboard_summary(self.data_dir)
@@ -261,11 +273,12 @@ class StrategyEvolver:
             notes, shared_summary, lb_summary,
         )
 
-        # Invoke Claude for strategy evolution
+        # Invoke Claude for strategy evolution (use sonnet for deeper reasoning)
         try:
             proc = await asyncio.wait_for(
                 asyncio.create_subprocess_exec(
                     "claude", "-p", prompt, "--output-format", "text",
+                    "--model", self.EVOLUTION_MODEL,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     cwd=agent_dir,

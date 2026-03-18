@@ -27,14 +27,128 @@ def init_project(project_dir: str):
     os.makedirs(project_dir, exist_ok=True)
     data_dir = os.path.join(project_dir, "data")
     agents_dir = os.path.join(project_dir, "agents")
-    for subdir in ["live", "polling", "history", "rounds", "coordinator", "archive"]:
+    for subdir in ["live", "polling", "history", "rounds", "coordinator", "archive", "shared_knowledge"]:
         os.makedirs(os.path.join(data_dir, subdir), exist_ok=True)
     os.makedirs(agents_dir, exist_ok=True)
+
+    # Seed shared knowledge directory with initial guidance
+    shared_dir = os.path.join(data_dir, "shared_knowledge")
+    guidance_path = os.path.join(shared_dir, "approaches.md")
+    if not os.path.exists(guidance_path):
+        with open(guidance_path, "w") as f:
+            f.write("""# Strategy Approaches
+
+You are free to use ANY approach to predict BTC 5-minute direction. Some ideas:
+
+## Traditional Finance
+- Technical analysis (RSI, MACD, Bollinger Bands, moving averages)
+- Order book microstructure (imbalance, depth, spread dynamics)
+- Volume profile analysis, VWAP
+- Funding rate arbitrage signals
+- Open interest divergence
+
+## Alternative / Unconventional
+- Yi Jing (I Ching) hexagram casting based on market data as seed
+- Tarot-inspired pattern mapping (market archetypes)
+- Numerology patterns in price/volume digits
+- Astrological correlations (lunar cycles, planetary alignments)
+- Fibonacci sequences in price action
+- Fractal analysis and self-similarity detection
+
+## Statistical / ML-Inspired
+- Mean reversion with dynamic thresholds
+- Regime detection (trending vs ranging vs volatile)
+- Cross-correlation between Polymarket odds and actual outcomes
+- Bayesian probability updating
+- Markov chain state transitions
+
+## Meta-Strategies
+- Contrarian: fade extreme consensus
+- Follow the smart money: track top trader positioning
+- Time-of-day patterns (certain hours more predictable)
+- Volatility regime switching
+
+The best approach is the one that WORKS. Win rate is all that matters.
+Don't be afraid to try something unconventional — the tournament will
+keep what works and discard what doesn't.
+""")
     config_path = os.path.join(project_dir, "config.json")
     if not os.path.exists(config_path):
         config = Config()
         with open(config_path, "w") as f:
             json.dump({k: v for k, v in config.__dict__.items()}, f, indent=2)
+
+
+async def _invoke_single_agent(
+    agent_name: str,
+    agents_dir: str,
+    snapshot: dict,
+    predictor: Predictor,
+    runner: AgentRunner,
+    round_timestamp: int,
+    shared_knowledge_dir: str,
+):
+    """Invoke a single agent for prediction. Designed to run in parallel."""
+    agent_dir = os.path.join(agents_dir, agent_name)
+
+    strategy_path = os.path.join(agent_dir, "strategy.md")
+    if not os.path.exists(strategy_path):
+        return
+    with open(strategy_path) as f:
+        strategy = f.read()
+
+    scripts = {}
+    scripts_dir = os.path.join(agent_dir, "scripts")
+    if os.path.isdir(scripts_dir):
+        for fname in os.listdir(scripts_dir):
+            fpath = os.path.join(scripts_dir, fname)
+            if os.path.isfile(fpath):
+                with open(fpath) as f:
+                    scripts[fname] = f.read()
+
+    notes_path = os.path.join(agent_dir, "notes.md")
+    notes = ""
+    if os.path.exists(notes_path):
+        with open(notes_path) as f:
+            notes = f.read()
+
+    # Add shared knowledge
+    if os.path.isdir(shared_knowledge_dir):
+        shared_files = []
+        for fname in sorted(os.listdir(shared_knowledge_dir)):
+            fpath = os.path.join(shared_knowledge_dir, fname)
+            if os.path.isfile(fpath) and fname.endswith((".md", ".txt", ".json")):
+                with open(fpath) as f:
+                    shared_files.append(f"### Shared: {fname}\n{f.read()}")
+        if shared_files:
+            notes += "\n\n## Shared Knowledge Base\n" + "\n\n".join(shared_files)
+
+    # Recent results summary
+    preds = read_jsonl(os.path.join(agent_dir, "predictions.jsonl"))
+    scored = [p for p in preds if p.get("correct") is not None]
+    recent = scored[-10:]
+    recent_str = ", ".join("W" if p["correct"] else "L" for p in recent) if recent else "no history"
+
+    result = await predictor.get_prediction(
+        agent_dir=agent_dir,
+        strategy=strategy,
+        snapshot=snapshot,
+        scripts=scripts,
+        recent_results=recent_str,
+        notes=notes,
+    )
+
+    if result is None:
+        logger.warning(f"  {agent_name}: timeout/error, skipping")
+        return
+
+    strategy_version = str(hash(strategy))[:8]
+    runner.record_prediction(
+        agent_name, round_timestamp,
+        result["prediction"], result["confidence"],
+        result["reasoning"], strategy_version,
+    )
+    logger.info(f"  {agent_name}: {result['prediction']} (confidence {result['confidence']:.0%}) — {result['reasoning'][:80]}")
 
 
 async def _run_round(
@@ -46,7 +160,7 @@ async def _run_round(
     fast_fail: FastFailChecker,
     config: Config,
 ):
-    """Invoke all agents for a single round, collect predictions."""
+    """Invoke ALL agents in PARALLEL for a single round."""
     snapshot_path = os.path.join(data_dir, "rounds", str(round_timestamp), "snapshot.json")
     if not os.path.exists(snapshot_path):
         logger.warning(f"No snapshot for round {round_timestamp}, skipping")
@@ -56,62 +170,18 @@ async def _run_round(
         snapshot = json.load(f)
 
     agents = runner.discover_agents()
-    logger.info(f"Round {round_timestamp}: invoking {len(agents)} agents")
+    shared_knowledge_dir = os.path.join(data_dir, "shared_knowledge")
+    logger.info(f"Round {round_timestamp}: invoking {len(agents)} agents IN PARALLEL")
 
-    for agent_name in agents:
-        agent_dir = os.path.join(agents_dir, agent_name)
-
-        # Read agent's strategy and scripts
-        strategy_path = os.path.join(agent_dir, "strategy.md")
-        if not os.path.exists(strategy_path):
-            continue
-        with open(strategy_path) as f:
-            strategy = f.read()
-
-        scripts = {}
-        scripts_dir = os.path.join(agent_dir, "scripts")
-        if os.path.isdir(scripts_dir):
-            for fname in os.listdir(scripts_dir):
-                fpath = os.path.join(scripts_dir, fname)
-                if os.path.isfile(fpath):
-                    with open(fpath) as f:
-                        scripts[fname] = f.read()
-
-        notes_path = os.path.join(agent_dir, "notes.md")
-        notes = ""
-        if os.path.exists(notes_path):
-            with open(notes_path) as f:
-                notes = f.read()
-
-        # Recent results summary
-        preds = read_jsonl(os.path.join(agent_dir, "predictions.jsonl"))
-        scored = [p for p in preds if p.get("correct") is not None]
-        recent = scored[-10:]
-        recent_str = ", ".join("W" if p["correct"] else "L" for p in recent) if recent else "no history"
-
-        # Get prediction from Claude
-        result = await predictor.get_prediction(
-            agent_dir=agent_dir,
-            strategy=strategy,
-            snapshot=snapshot,
-            scripts=scripts,
-            recent_results=recent_str,
-            notes=notes,
+    # Invoke all agents concurrently
+    tasks = [
+        _invoke_single_agent(
+            agent_name, agents_dir, snapshot, predictor,
+            runner, round_timestamp, shared_knowledge_dir,
         )
-
-        if result is None:
-            logger.warning(f"Agent {agent_name} returned no prediction (timeout/error), skipping")
-            continue
-
-        # Record the prediction
-        # Use git HEAD as strategy version
-        strategy_version = str(hash(strategy))[:8]
-        runner.record_prediction(
-            agent_name, round_timestamp,
-            result["prediction"], result["confidence"],
-            result["reasoning"], strategy_version,
-        )
-        logger.info(f"  {agent_name}: {result['prediction']} (confidence {result['confidence']:.0%})")
+        for agent_name in agents
+    ]
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def _score_round(round_timestamp: int, data_dir: str, runner: AgentRunner, fast_fail: FastFailChecker, agents_dir: str):

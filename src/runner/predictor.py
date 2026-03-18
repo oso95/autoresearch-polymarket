@@ -36,8 +36,14 @@ def parse_prediction_response(response: str) -> dict | None:
 
 
 class Predictor:
-    def __init__(self, timeout_seconds: int = 90):
+    # Model tiers: use fast models for predictions, stronger for evolution
+    MODEL_FAST = "haiku"     # Predictions (speed matters, 10 agents per round)
+    MODEL_BALANCED = "sonnet"  # Evolution (needs reasoning but not slow)
+    MODEL_STRONG = "opus"      # Tournament analysis (rare, quality matters)
+
+    def __init__(self, timeout_seconds: int = 90, model: str = "haiku"):
         self.timeout = timeout_seconds
+        self.model = model
 
     def build_prompt(self, strategy: str, snapshot: dict, scripts: dict, recent_results: str, notes: str) -> str:
         parts = [
@@ -71,12 +77,14 @@ class Predictor:
         ])
         return "\n".join(parts)
 
-    async def get_prediction(self, agent_dir: str, strategy: str, snapshot: dict, scripts: dict, recent_results: str, notes: str) -> dict | None:
+    async def get_prediction(self, agent_dir: str, strategy: str, snapshot: dict, scripts: dict, recent_results: str, notes: str, model: str | None = None) -> dict | None:
         prompt = self.build_prompt(strategy, snapshot, scripts, recent_results, notes)
+        use_model = model or self.model
         try:
+            cmd = ["claude", "-p", prompt, "--output-format", "text", "--model", use_model]
             proc = await asyncio.wait_for(
                 asyncio.create_subprocess_exec(
-                    "claude", "-p", prompt, "--output-format", "text",
+                    *cmd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     cwd=agent_dir,
