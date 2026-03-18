@@ -50,6 +50,8 @@ async def main():
                         help="Max agents backtesting in parallel (default: 3)")
     parser.add_argument("--timeout", type=int, default=90,
                         help="Prediction timeout in seconds (default: 90)")
+    parser.add_argument("--batch-size", type=int, default=10,
+                        help="Rounds per Claude call in batch mode (default: 10, use 1 for single mode)")
     parser.add_argument("--output", default=None,
                         help="Output JSON file path (default: live-run/data/backtest-results.json)")
     args = parser.parse_args()
@@ -87,6 +89,7 @@ async def main():
         model=args.model or "haiku",
         timeout=args.timeout,
         concurrency=args.concurrency,
+        batch_size=args.batch_size,
     )
 
     if args.split > 0:

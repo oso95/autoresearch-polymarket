@@ -97,21 +97,25 @@ class Backtester:
         model: str = "haiku",
         timeout: int = 90,
         concurrency: int = 10,
+        batch_size: int = 10,
     ):
         self.agents_dir = agents_dir
         self.data_dir = data_dir
         self.predictor = Predictor(timeout_seconds=timeout, model=model)
         self.concurrency = concurrency
+        self.batch_size = batch_size
 
     async def backtest_agent(
         self,
         agent_name: str,
         rounds: list[dict],
-        backtest_results: str | None = None,
+        batch_size: int = 10,
     ) -> dict:
-        """Run a single agent through a set of historical rounds.
+        """Run a single agent through historical rounds using batch prediction.
 
-        Returns dict with win_rate, total, wins, predictions, confidence_interval.
+        batch_size: number of rounds per Claude call. Higher = faster but less accurate
+        (the model has to process more data per call). 10 is a good balance.
+        Set to 1 for single-round mode (slower but matches live behavior exactly).
         """
         agent_dir = os.path.join(self.agents_dir, agent_name)
         strategy_path = os.path.join(agent_dir, "strategy.md")
@@ -137,59 +141,45 @@ class Backtester:
                     with open(fpath) as f:
                         scripts[fname] = f.read()
 
-        sem = asyncio.Semaphore(self.concurrency)
+        model = agent_config.get("model")
         predictions = []
 
-        async def _predict_round(round_data: dict, recent_str: str):
-            async with sem:
-                with open(round_data["snapshot_path"]) as f:
-                    snapshot = trim_snapshot(json.load(f))
+        if batch_size > 1:
+            # BATCH MODE: send multiple snapshots per Claude call (much faster)
+            batches = [rounds[i:i+batch_size] for i in range(0, len(rounds), batch_size)]
+            sem = asyncio.Semaphore(self.concurrency)
 
-                model = agent_config.get("model")
-                result = await self.predictor.get_prediction(
-                    agent_dir=agent_dir,
-                    strategy=strategy,
-                    snapshot=snapshot,
-                    scripts=scripts,
-                    recent_results=recent_str,
-                    notes="",
-                    model=model,
-                )
-                return result, round_data
+            async def _predict_batch(batch: list[dict]):
+                async with sem:
+                    snapshots = []
+                    for rd in batch:
+                        with open(rd["snapshot_path"]) as f:
+                            snapshots.append(trim_snapshot(json.load(f)))
 
-        # Build running recent results as we go (simulate live conditions)
-        results_so_far = []
-        tasks = []
+                    results = await self.predictor.get_batch_predictions(
+                        agent_dir=agent_dir,
+                        strategy=strategy,
+                        snapshots=snapshots,
+                        scripts=scripts,
+                        notes="",
+                        model=model,
+                    )
+                    return list(zip(results, batch))
 
-        for i, round_data in enumerate(rounds):
-            # Build recent results string from backtest so far
-            recent = results_so_far[-10:]
-            recent_str = ", ".join("W" if r else "L" for r in recent) if recent else "no history"
+            tasks = [_predict_batch(batch) for batch in batches]
+            batch_results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            tasks.append(_predict_round(round_data, recent_str))
-
-            # We can't wait for each prediction before starting the next
-            # (that would be serial). Instead, batch by concurrency windows.
-            # For simplicity and speed, fire all at once — recent_results
-            # will be slightly stale for parallel rounds but that's acceptable
-            # for backtesting (matches live behavior where agents predict in parallel).
-            if len(tasks) >= self.concurrency or i == len(rounds) - 1:
-                batch_results = await asyncio.gather(*tasks, return_exceptions=True)
-                for br in batch_results:
-                    if isinstance(br, Exception):
-                        logger.warning(f"Backtest prediction error: {br}")
-                        continue
-                    result, rd = br
+            for br in batch_results:
+                if isinstance(br, Exception):
+                    logger.warning(f"Batch prediction error: {br}")
+                    continue
+                for result, rd in br:
                     if result is None:
                         continue
-
                     prediction = result["prediction"]
-                    # Apply mirror
                     if agent_config.get("mirror"):
                         prediction = "Down" if prediction == "Up" else "Up"
-
                     correct = prediction.strip().lower() == rd["outcome"].strip().lower()
-                    results_so_far.append(correct)
                     predictions.append({
                         "round": rd["timestamp"],
                         "prediction": prediction,
@@ -198,7 +188,45 @@ class Backtester:
                         "confidence": result.get("confidence", 0.5),
                         "reasoning": result.get("reasoning", "")[:100],
                     })
-                tasks = []
+        else:
+            # SINGLE MODE: one Claude call per round (slower, matches live exactly)
+            sem = asyncio.Semaphore(self.concurrency)
+
+            async def _predict_single(round_data: dict):
+                async with sem:
+                    with open(round_data["snapshot_path"]) as f:
+                        snapshot = trim_snapshot(json.load(f))
+                    result = await self.predictor.get_prediction(
+                        agent_dir=agent_dir,
+                        strategy=strategy,
+                        snapshot=snapshot,
+                        scripts=scripts,
+                        recent_results="",
+                        notes="",
+                        model=model,
+                    )
+                    return result, round_data
+
+            tasks = [_predict_single(rd) for rd in rounds]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for br in results:
+                if isinstance(br, Exception):
+                    continue
+                result, rd = br
+                if result is None:
+                    continue
+                prediction = result["prediction"]
+                if agent_config.get("mirror"):
+                    prediction = "Down" if prediction == "Up" else "Up"
+                correct = prediction.strip().lower() == rd["outcome"].strip().lower()
+                predictions.append({
+                    "round": rd["timestamp"],
+                    "prediction": prediction,
+                    "outcome": rd["outcome"],
+                    "correct": correct,
+                    "confidence": result.get("confidence", 0.5),
+                    "reasoning": result.get("reasoning", "")[:100],
+                })
 
         wins = sum(1 for p in predictions if p["correct"])
         total = len(predictions)
@@ -232,9 +260,9 @@ class Backtester:
 
         async def _run_agent(name):
             async with sem:
-                logger.info(f"Backtesting {name} ({len(rounds)} rounds)...")
+                logger.info(f"Backtesting {name} ({len(rounds)} rounds, batch={self.batch_size})...")
                 start = time.time()
-                result = await self.backtest_agent(name, rounds)
+                result = await self.backtest_agent(name, rounds, batch_size=self.batch_size)
                 elapsed = time.time() - start
                 if "error" not in result:
                     logger.info(
