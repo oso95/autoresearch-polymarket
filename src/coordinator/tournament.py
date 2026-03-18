@@ -64,13 +64,41 @@ class Tournament:
             actions.append({"type": "spawn", "agent": name, "seed": SEED_STRATEGIES[seed_idx]["name"]})
             seed_idx += 1
 
-        if len(alive) < self.config.max_agents and board:
-            top = board[0]
-            if top.total_rounds >= 10:
-                mutation = f"Experiment with variation of {top.agent_name}'s approach"
-                clone_name = self.spawner.clone_agent(top.agent_name, mutation)
-                alive.append(clone_name)
-                actions.append({"type": "clone", "source": top.agent_name, "clone": clone_name})
+        # Clone top 2-3 agents with diverse mutations (prefer different strategy families)
+        # Clone top 2-3 agents with diverse mutations (prefer different strategy families)
+        cloned_bases = set()
+        mutation_ideas = [
+            "Try a more aggressive threshold (lower confidence requirement)",
+            "Add a contrarian filter: if signal agrees with market consensus, reduce confidence",
+            "Incorporate time-of-day weighting (different hours have different patterns)",
+            "Add a volatility regime check: only trade when ATR is in a specific range",
+            "Experiment with inverting your weakest signal source",
+            "Try combining your approach with Fibonacci time zones",
+        ]
+        clone_count = 0
+        for i, entry in enumerate(board):
+            if len(alive) >= self.config.max_agents or clone_count >= 3:
+                break
+            if entry.total_rounds < 10:
+                continue
+            if entry.agent_name not in alive:
+                continue
+            # Prefer diversity: extract strategy family from agent name
+            # agent-NNN-<type> → strip clone-/mirror- prefixes to get family
+            parts = entry.agent_name.split("-", 2)
+            suffix = parts[2] if len(parts) > 2 else ""
+            for prefix in ("clone-", "mirror-"):
+                while suffix.startswith(prefix):
+                    suffix = suffix[len(prefix):]
+            base = suffix or entry.agent_name
+            if base in cloned_bases:
+                continue
+            cloned_bases.add(base)
+            mutation = mutation_ideas[clone_count % len(mutation_ideas)]
+            clone_name = self.spawner.clone_agent(entry.agent_name, mutation)
+            alive.append(clone_name)
+            actions.append({"type": "clone", "source": entry.agent_name, "clone": clone_name})
+            clone_count += 1
 
         alerts_path = os.path.join(self.data_dir, "coordinator", "alerts.jsonl")
         for entry in board:

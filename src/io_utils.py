@@ -42,3 +42,29 @@ def read_jsonl(path: str) -> list[dict]:
             if line:
                 results.append(json.loads(line))
     return results
+
+
+def read_jsonl_tail(path: str, n: int = 20) -> list[dict]:
+    """Read only the last N lines of a JSONL file efficiently."""
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)  # Seek to end
+            size = f.tell()
+            if size == 0:
+                return []
+            # Read last chunk (generous estimate: 500 bytes per line)
+            chunk_size = min(size, n * 500)
+            f.seek(max(0, size - chunk_size))
+            data = f.read().decode("utf-8")
+        lines = [l.strip() for l in data.split("\n") if l.strip()]
+        results = []
+        for line in lines[-n:]:
+            try:
+                results.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue  # Skip partial first line from mid-seek
+        return results
+    except Exception:
+        return read_jsonl(path)[-n:]  # Fallback

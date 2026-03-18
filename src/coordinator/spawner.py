@@ -1,4 +1,5 @@
 # src/coordinator/spawner.py
+import json
 import os
 import shutil
 import logging
@@ -268,6 +269,161 @@ principles. Markets are driven by fear, greed, and herding behavior.
 - No clear psychological pattern: 50%
 """,
     },
+    {
+        "name": "tarot-arcana",
+        "strategy": """# Tarot Arcana Market Reader
+
+## Focus
+Map market conditions to Tarot Major Arcana archetypes to predict BTC direction.
+Markets cycle through archetypal phases — panic (Tower), euphoria (Sun), indecision (Hanged Man).
+
+## Data Sources
+- Primary: `binance_candles_5m` (candle patterns → archetype mapping)
+- Secondary: `polymarket_orderbook` (sentiment extremes)
+- Tertiary: `polling/funding_rate`, `polling/long_short_ratio`
+
+## Decision Logic
+1. Identify the current Market Archetype from candle patterns:
+   - THE TOWER (XVI): Sudden large red candle (>0.3% drop) + volume spike → market crash/panic
+     → Predict UP (Tower events create buying opportunities, panic selling overshoots)
+   - THE SUN (XIX): 3+ consecutive green candles + rising volume → euphoria
+     → Predict DOWN (euphoria is unsustainable at 5-min scale, mean reversion imminent)
+   - THE HANGED MAN (XII): Tight range, doji candles, low volume → suspended market
+     → Predict based on the NEXT candle's first tick direction (breakout signal)
+   - THE WHEEL OF FORTUNE (X): Alternating green/red candles → cycling market
+     → Predict opposite of last candle (the wheel turns)
+   - THE FOOL (0): No clear pattern, randomness dominates
+     → Predict DOWN (in uncertain 5-min markets, gravity wins slightly)
+   - DEATH (XIII): Long declining trend (5+ red candles) with volume drying up
+     → Predict UP (death = transformation, the decline is exhausted)
+   - THE CHARIOT (VII): Strong directional move with increasing volume
+     → Predict continuation for 1 more candle, then reversal
+
+2. Cross-reference with "Spread" (3-card reading):
+   - Past (candle -3): sets the trend context
+   - Present (candle -1): current energy
+   - Future (prediction): derived from archetype + pattern
+
+3. Reversed cards (contrarian):
+   - If funding rate is extreme (>0.05% or <-0.05%), the archetype is "reversed"
+   - Reversed archetypes flip their prediction
+
+## Confidence
+- Clear archetype + funding confirmation: 70%
+- Clear archetype alone: 60%
+- Ambiguous / Fool archetype: 50%
+
+## Philosophy
+Markets are collective human behavior. Archetypes capture recurring psychological
+patterns better than pure statistics. The Tarot framework provides a structured
+way to interpret market "mood" that technical indicators miss.
+""",
+    },
+    {
+        "name": "gematria-numerology",
+        "strategy": """# Gematria & Numerology
+
+## Focus
+Find predictive patterns in the numerical properties of price, volume, and
+time data. Numerology posits that certain numbers carry energy — markets
+are human constructs and humans have number biases.
+
+## Data Sources
+- Primary: `binance_candles_5m` (price digits, volume patterns)
+- Secondary: `chainlink_btc_price` (oracle price digit analysis)
+
+## Decision Logic
+1. Price digit analysis:
+   - Extract last 2 significant digits of BTC price (e.g., 84,372 → 72)
+   - Reduce to single digit: 7+2 = 9
+   - Odd digits (1,3,5,7,9) = Yang energy → slight UP bias
+   - Even digits (2,4,6,8) = Yin energy → slight DOWN bias
+   - Master numbers (11, 22, 33) in price → amplified signal
+
+2. Volume numerology:
+   - Sum digits of last candle volume
+   - If digit sum is prime (2,3,5,7) → "active energy" → follow momentum
+   - If digit sum is composite → "stable energy" → mean reversion
+   - Volume ending in 0 or 5 → "round number effect" → reversal likely
+
+3. Time-based cycles:
+   - Current hour (UTC) mod 3:
+     - 0 → "creation" phase → UP bias
+     - 1 → "sustaining" phase → follow trend
+     - 2 → "destruction" phase → DOWN bias
+   - Fibonacci minutes (1, 2, 3, 5, 8, 13, 21, 34, 55): if current minute
+     is a Fibonacci number, signal is amplified
+
+4. Price-to-volume ratio:
+   - Gematria value = (price digit sum * volume digit sum) mod 9
+   - Values 1-4 → UP
+   - Values 5-8 → DOWN
+   - Value 0 or 9 → neutral (use other signals)
+
+## Confidence
+- Multiple numerological signals aligned: 65%
+- Single strong signal: 55%
+- Conflicting signals: 50%
+
+## Philosophy
+Numbers are not random — they reflect the hidden order of markets.
+Trader psychology creates patterns around round numbers, lucky numbers,
+and time cycles that pure technical analysis ignores.
+""",
+    },
+    {
+        "name": "astro-cycles",
+        "strategy": """# Astro-Cycles & Lunar Trading
+
+## Focus
+Use astronomical cycles (lunar phases, time-of-day solar cycles) as
+predictive signals for short-term BTC volatility and direction.
+
+## Data Sources
+- Primary: `binance_candles_5m` (price action to correlate with cycles)
+- Secondary: Current UTC timestamp (derive lunar phase, solar hour)
+
+## Decision Logic
+1. Lunar phase estimation (from timestamp):
+   - Known new moon epoch: Jan 6, 2000 00:00 UTC
+   - Lunar cycle = 29.53059 days
+   - Calculate days since epoch mod 29.53059
+   - Phase 0-7.38 (New Moon → First Quarter): GROWTH phase → UP bias
+   - Phase 7.38-14.77 (First Quarter → Full Moon): PEAK phase → UP then DOWN
+   - Phase 14.77-22.15 (Full Moon → Last Quarter): DECLINE phase → DOWN bias
+   - Phase 22.15-29.53 (Last Quarter → New Moon): RENEWAL phase → UP bias
+   - Full Moon ±1 day: heightened volatility, contrarian signals work better
+   - New Moon ±1 day: low volatility, trend-following works better
+
+2. Solar hour cycles (UTC hour):
+   - 00-04 (Asia night): Low BTC volume → mean reversion
+   - 04-08 (Asia morning): Rising activity → momentum signals
+   - 08-12 (Europe open): High volatility → contrarian on spikes
+   - 12-16 (US pre-market): Trend continuation likely
+   - 16-20 (US market hours): Highest volume → strongest signals
+   - 20-24 (US evening): Declining volume → fade big moves
+
+3. Combine cycle signals:
+   - Lunar phase direction + solar hour tendency → combined signal
+   - If both agree → stronger confidence
+   - If conflicting → check recent 3 candle momentum as tiebreaker
+
+4. Eclipse effect (Full/New Moon):
+   - Near full/new moon: increase contrarian weight by 20%
+   - Markets are more "emotional" around lunar extremes
+
+## Confidence
+- Lunar + solar + candle agreement: 68%
+- Two of three agree: 58%
+- Single signal only: 50%
+
+## Philosophy
+Cryptocurrency markets are 24/7 global markets heavily influenced by
+when different regions are active. Lunar cycles correlate with human
+behavioral patterns (sleep, mood, risk appetite). These subtle biases
+compound across millions of traders.
+""",
+    },
 ]
 
 
@@ -309,6 +465,11 @@ class AgentSpawner:
         clone_name = f"agent-{agent_id:03d}-clone-{source_name.split('-', 2)[-1]}"
         clone_dir = os.path.join(self.agents_dir, clone_name)
         shutil.copytree(source_dir, clone_dir)
+        # Remove source's agent_config.json — clones should start with default config
+        # (prevents inheriting mirror flags or model overrides from source)
+        clone_config_path = os.path.join(clone_dir, "agent_config.json")
+        if os.path.exists(clone_config_path):
+            os.unlink(clone_config_path)
         pred_path = os.path.join(clone_dir, "predictions.jsonl")
         if os.path.exists(pred_path):
             os.unlink(pred_path)
@@ -320,6 +481,53 @@ class AgentSpawner:
             f.write(f"\n## Coordinator Mutation\nCloned from {source_name}.\nMutation instruction: {mutation_note}\n")
         logger.info(f"Cloned {source_name} -> {clone_name} with mutation: {mutation_note}")
         return clone_name
+
+    def spawn_mirror(self, source_name: str) -> str:
+        """Create a mirror agent that flips the source agent's signal (Up→Down, Down→Up).
+
+        The mirror runs the same strategy but inverts the final prediction.
+        If the source is anti-predictive (low win rate), the mirror should win.
+        """
+        source_dir = os.path.join(self.agents_dir, source_name)
+        agent_id = self._next_id()
+        # Extract the base name, removing any existing "clone-" prefixes
+        base_name = source_name.split("-", 2)[-1]
+        mirror_name = f"agent-{agent_id:03d}-mirror-{base_name}"
+        mirror_dir = os.path.join(self.agents_dir, mirror_name)
+        shutil.copytree(source_dir, mirror_dir)
+
+        # Clear predictions (fresh start)
+        pred_path = os.path.join(mirror_dir, "predictions.jsonl")
+        if os.path.exists(pred_path):
+            os.unlink(pred_path)
+        results_path = os.path.join(mirror_dir, "results.tsv")
+        with open(results_path, "w") as f:
+            f.write("iteration\tstrategy_version\twin_rate\tdelta\trounds_played\tstatus\tdescription\n")
+
+        # Write agent_config.json with mirror flag
+        config = {"mirror": True, "source_agent": source_name}
+        with open(os.path.join(mirror_dir, "agent_config.json"), "w") as f:
+            json.dump(config, f, indent=2)
+
+        # Update notes
+        notes_path = os.path.join(mirror_dir, "notes.md")
+        with open(notes_path, "w") as f:
+            f.write(f"# Mirror of {source_name}\n\n")
+            f.write(f"This agent runs the SAME strategy as {source_name} but INVERTS the final signal.\n")
+            f.write(f"If {source_name} says Up, this agent says Down (and vice versa).\n\n")
+            f.write(f"Hypothesis: If the source agent is consistently wrong, the mirror should be consistently right.\n")
+
+        logger.info(f"Spawned mirror {mirror_name} (inverting {source_name})")
+        return mirror_name
+
+    def spawn_with_config(self, seed: dict, agent_config: dict | None = None) -> str:
+        """Spawn from seed with optional agent_config.json (for model override, etc.)."""
+        agent_name = self.spawn_from_seed(seed)
+        if agent_config:
+            agent_dir = os.path.join(self.agents_dir, agent_name)
+            with open(os.path.join(agent_dir, "agent_config.json"), "w") as f:
+                json.dump(agent_config, f, indent=2)
+        return agent_name
 
     def retire_agent(self, agent_name: str, graveyard_dir: str):
         agent_dir = os.path.join(self.agents_dir, agent_name)

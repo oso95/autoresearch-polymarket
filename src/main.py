@@ -17,7 +17,7 @@ from src.runner.health_monitor import HealthMonitor
 from src.runner.predictor import Predictor
 from src.runner.fast_fail import FastFailChecker
 from src.runner.evolver import StrategyEvolver
-from src.io_utils import read_jsonl
+from src.io_utils import read_jsonl, read_jsonl_tail
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -112,22 +112,41 @@ async def _invoke_single_agent(
         with open(notes_path) as f:
             notes = f.read()
 
-    # Add shared knowledge
+    # Add shared knowledge (core files + last 10 discoveries to save tokens)
     if os.path.isdir(shared_knowledge_dir):
         shared_files = []
+        core_files = []
+        discovery_files = []
         for fname in sorted(os.listdir(shared_knowledge_dir)):
             fpath = os.path.join(shared_knowledge_dir, fname)
             if os.path.isfile(fpath) and fname.endswith((".md", ".txt", ".json")):
-                with open(fpath) as f:
-                    shared_files.append(f"### Shared: {fname}\n{f.read()}")
+                if fname.startswith("discovery-"):
+                    discovery_files.append((fname, fpath))
+                else:
+                    core_files.append((fname, fpath))
+        # Always include core files (approaches.md, tournament-insights.md)
+        for fname, fpath in core_files:
+            with open(fpath) as f:
+                shared_files.append(f"### Shared: {fname}\n{f.read()}")
+        # Only include last 10 discoveries (most recent)
+        for fname, fpath in discovery_files[-10:]:
+            with open(fpath) as f:
+                shared_files.append(f"### Shared: {fname}\n{f.read()}")
         if shared_files:
             notes += "\n\n## Shared Knowledge Base\n" + "\n\n".join(shared_files)
 
-    # Recent results summary
-    preds = read_jsonl(os.path.join(agent_dir, "predictions.jsonl"))
+    # Recent results summary (use tail read for efficiency — only need last 20)
+    preds = read_jsonl_tail(os.path.join(agent_dir, "predictions.jsonl"), 20)
     scored = [p for p in preds if p.get("correct") is not None]
     recent = scored[-10:]
     recent_str = ", ".join("W" if p["correct"] else "L" for p in recent) if recent else "no history"
+
+    # Read agent_config.json once (for model override + mirror flag)
+    agent_config = {}
+    agent_config_path = os.path.join(agent_dir, "agent_config.json")
+    if os.path.exists(agent_config_path):
+        with open(agent_config_path) as f:
+            agent_config = json.load(f)
 
     result = await predictor.get_prediction(
         agent_dir=agent_dir,
@@ -136,11 +155,18 @@ async def _invoke_single_agent(
         scripts=scripts,
         recent_results=recent_str,
         notes=notes,
+        model=agent_config.get("model"),
     )
 
     if result is None:
         logger.warning(f"  {agent_name}: timeout/error, skipping")
         return
+
+    # Mirror agent support: flip signal
+    if agent_config.get("mirror"):
+        original = result["prediction"]
+        result["prediction"] = "Down" if original == "Up" else "Up"
+        result["reasoning"] = f"[MIRROR of {original}] {result['reasoning']}"
 
     strategy_version = str(hash(strategy))[:8]
     runner.record_prediction(
@@ -185,10 +211,10 @@ async def _run_round(
 
     agents = runner.discover_agents()
     shared_knowledge_dir = os.path.join(data_dir, "shared_knowledge")
-    logger.info(f"Round {round_timestamp}: invoking {len(agents)} agents (max 3 concurrent)")
+    logger.info(f"Round {round_timestamp}: invoking {len(agents)} agents (max 8 concurrent)")
 
     # Use semaphore to limit concurrent Claude CLI calls (avoid rate limits)
-    sem = asyncio.Semaphore(5)  # Increased for larger agent pool
+    sem = asyncio.Semaphore(8)  # Increased for larger agent pool (38+ agents)
 
     async def _limited_invoke(agent_name):
         async with sem:
@@ -301,7 +327,17 @@ async def _score_round(round_timestamp: int, data_dir: str, runner: AgentRunner,
 
 async def _evolve_single_agent(evolver: StrategyEvolver, agent_name: str, agents_dir: str):
     """Evolve a single agent. Designed to run with limited concurrency."""
-    preds = read_jsonl(os.path.join(agents_dir, agent_name, "predictions.jsonl"))
+    agent_dir = os.path.join(agents_dir, agent_name)
+
+    # Skip mirror agents — their strategy must stay frozen to test the mirror hypothesis
+    config_path = os.path.join(agent_dir, "agent_config.json")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            agent_config = json.load(f)
+        if agent_config.get("mirror"):
+            return
+
+    preds = read_jsonl(os.path.join(agent_dir, "predictions.jsonl"))
     scored = [p for p in preds if p.get("correct") is not None]
     if len(scored) < 3:
         return
@@ -319,7 +355,7 @@ async def _evolve_single_agent(evolver: StrategyEvolver, agent_name: str, agents
 async def _evolve_agents(evolver: StrategyEvolver, runner: AgentRunner, fast_fail: FastFailChecker, agents_dir: str):
     """Run the autoresearch inner loop: evolve agents (2 concurrent to save time)."""
     agents = runner.discover_agents()
-    sem = asyncio.Semaphore(2)  # 2 concurrent evolutions (sonnet is heavier)
+    sem = asyncio.Semaphore(3)  # 3 concurrent evolutions (sonnet, parallelized more)
 
     async def _limited(name):
         async with sem:

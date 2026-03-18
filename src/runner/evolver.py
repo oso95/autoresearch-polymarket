@@ -257,14 +257,24 @@ class StrategyEvolver:
             with open(notes_path) as f:
                 notes = f.read()
 
-        # Read shared knowledge
+        # Read shared knowledge (core files + last 10 discoveries to save tokens)
         shared_knowledge_dir = os.path.join(self.data_dir, "shared_knowledge")
         if os.path.isdir(shared_knowledge_dir):
+            core_files = []
+            discovery_files = []
             for fname in sorted(os.listdir(shared_knowledge_dir)):
                 fpath = os.path.join(shared_knowledge_dir, fname)
                 if os.path.isfile(fpath) and fname.endswith((".md", ".txt")):
-                    with open(fpath) as f:
-                        notes += f"\n\n## Shared Knowledge: {fname}\n{f.read()}"
+                    if fname.startswith("discovery-"):
+                        discovery_files.append((fname, fpath))
+                    else:
+                        core_files.append((fname, fpath))
+            for fname, fpath in core_files:
+                with open(fpath) as f:
+                    notes += f"\n\n## Shared Knowledge: {fname}\n{f.read()}"
+            for fname, fpath in discovery_files[-10:]:
+                with open(fpath) as f:
+                    notes += f"\n\n## Shared Knowledge: {fname}\n{f.read()}"
 
         # Build context
         shared_summary = _build_shared_ledger_summary(self.agents_dir, agent_name)

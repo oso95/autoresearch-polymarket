@@ -4,7 +4,7 @@ import pytest
 from src.coordinator.spawner import AgentSpawner, SEED_STRATEGIES
 
 def test_seed_strategies_exist():
-    assert len(SEED_STRATEGIES) == 13
+    assert len(SEED_STRATEGIES) == 16
     for seed in SEED_STRATEGIES:
         assert "name" in seed
         assert "strategy" in seed
