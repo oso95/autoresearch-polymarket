@@ -188,7 +188,7 @@ async def _run_round(
     logger.info(f"Round {round_timestamp}: invoking {len(agents)} agents (max 3 concurrent)")
 
     # Use semaphore to limit concurrent Claude CLI calls (avoid rate limits)
-    sem = asyncio.Semaphore(3)
+    sem = asyncio.Semaphore(5)  # Increased for larger agent pool
 
     async def _limited_invoke(agent_name):
         async with sem:
