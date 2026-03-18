@@ -299,18 +299,20 @@ async def _score_round(round_timestamp: int, data_dir: str, runner: AgentRunner,
     correct_count = 0
 
     for agent_name in agents:
-        # Only score if agent made a prediction for this round
-        preds = read_jsonl(os.path.join(agents_dir, agent_name, "predictions.jsonl"))
-        has_prediction = any(p["round"] == round_timestamp and p.get("outcome") is None for p in preds)
+        # Use read_jsonl_tail to efficiently check recent predictions
+        # (the prediction for this round will be near the end of the file)
+        pred_path = os.path.join(agents_dir, agent_name, "predictions.jsonl")
+        recent_preds = read_jsonl_tail(pred_path, 5)
+        has_prediction = any(p["round"] == round_timestamp and p.get("outcome") is None for p in recent_preds)
         if not has_prediction:
             continue
 
         runner.score_round(agent_name, round_timestamp, outcome)
         scored_count += 1
 
-        # Check if prediction was correct
-        preds_after = read_jsonl(os.path.join(agents_dir, agent_name, "predictions.jsonl"))
-        for p in preds_after:
+        # Check correctness from the same data (score_round writes it back)
+        scored_preds = read_jsonl_tail(pred_path, 5)
+        for p in scored_preds:
             if p["round"] == round_timestamp and p.get("correct") is not None:
                 if p["correct"]:
                     correct_count += 1
