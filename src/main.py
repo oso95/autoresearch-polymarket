@@ -365,9 +365,9 @@ async def _orchestration_loop(
                         if latest_round != last_round:
                             last_round = latest_round
 
-                            # Check data layer health
-                            if monitor.is_round_data_stale():
-                                logger.warning(f"Data stale, skipping round {latest_round}")
+                            # Check data layer health (use heartbeat, not status.json)
+                            if not monitor.is_data_layer_healthy():
+                                logger.warning(f"Data layer unhealthy, skipping round {latest_round}")
                             else:
                                 await _run_round(
                                     latest_round, data_dir, agents_dir,
