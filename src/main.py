@@ -184,20 +184,94 @@ async def _run_round(
     await asyncio.gather(*tasks, return_exceptions=True)
 
 
+def _determine_outcome_from_candles(data_dir: str, round_timestamp: int) -> str | None:
+    """Determine Up/Down from Binance candle data.
+
+    Compare the BTC price at round start (from snapshot) to the current
+    latest candle close. If price went up → "Up", down → "Down".
+    This mirrors Polymarket's resolution (Chainlink tracks Binance closely).
+    """
+    # Get the snapshot's price
+    snapshot_path = os.path.join(data_dir, "rounds", str(round_timestamp), "snapshot.json")
+    if not os.path.exists(snapshot_path):
+        return None
+    try:
+        with open(snapshot_path) as f:
+            snapshot = json.load(f)
+        candles = snapshot.get("binance_candles_5m", {}).get("candles", [])
+        if not candles:
+            return None
+        open_price = candles[-1]["close"]  # Last candle close = this round's "open"
+    except (KeyError, IndexError, json.JSONDecodeError):
+        return None
+
+    # Get current price from live candles
+    candles_path = os.path.join(data_dir, "live", "binance_candles_5m.json")
+    if not os.path.exists(candles_path):
+        return None
+    try:
+        with open(candles_path) as f:
+            live = json.load(f)
+        live_candles = live.get("candles", [])
+        if not live_candles:
+            return None
+        close_price = live_candles[-1]["close"]
+    except (KeyError, IndexError, json.JSONDecodeError):
+        return None
+
+    return "Up" if close_price >= open_price else "Down"
+
+
 async def _score_round(round_timestamp: int, data_dir: str, runner: AgentRunner, fast_fail: FastFailChecker, agents_dir: str):
     """Score all agents for a resolved round."""
+    # Try official resolution first
     result_path = os.path.join(data_dir, "rounds", str(round_timestamp), "result.json")
-    if not os.path.exists(result_path):
+    outcome = None
+
+    if os.path.exists(result_path):
+        with open(result_path) as f:
+            result = json.load(f)
+        outcome = result.get("outcome")
+
+    # Fall back to candle-based determination
+    if not outcome:
+        outcome = _determine_outcome_from_candles(data_dir, round_timestamp)
+
+    if not outcome:
+        logger.warning(f"Cannot determine outcome for round {round_timestamp}, skipping scoring")
         return
 
-    with open(result_path) as f:
-        result = json.load(f)
+    # Write result.json if it didn't exist
+    if not os.path.exists(result_path):
+        from src.io_utils import atomic_write_json
+        atomic_write_json(result_path, {
+            "round_timestamp": round_timestamp,
+            "outcome": outcome,
+            "source": "candle_derived",
+            "resolved_at": int(time.time() * 1000),
+        })
 
-    outcome = result["outcome"]
     agents = runner.discover_agents()
+    scored_count = 0
+    correct_count = 0
 
     for agent_name in agents:
+        # Only score if agent made a prediction for this round
+        preds = read_jsonl(os.path.join(agents_dir, agent_name, "predictions.jsonl"))
+        has_prediction = any(p["round"] == round_timestamp and p.get("outcome") is None for p in preds)
+        if not has_prediction:
+            continue
+
         runner.score_round(agent_name, round_timestamp, outcome)
+        scored_count += 1
+
+        # Check if prediction was correct
+        preds_after = read_jsonl(os.path.join(agents_dir, agent_name, "predictions.jsonl"))
+        for p in preds_after:
+            if p["round"] == round_timestamp and p.get("correct") is not None:
+                if p["correct"]:
+                    correct_count += 1
+                break
 
         # Check fast-fail
         agent_dir = os.path.join(agents_dir, agent_name)
@@ -205,7 +279,7 @@ async def _score_round(round_timestamp: int, data_dir: str, runner: AgentRunner,
             fast_fail.revert_strategy(agent_dir)
             logger.info(f"  {agent_name}: FAST-FAIL triggered, reverted strategy")
 
-    logger.info(f"Round {round_timestamp} scored: outcome={outcome}")
+    logger.info(f"Round {round_timestamp} scored: outcome={outcome}, {correct_count}/{scored_count} correct")
 
 
 async def _evolve_agents(evolver: StrategyEvolver, runner: AgentRunner, fast_fail: FastFailChecker, agents_dir: str):
@@ -277,10 +351,10 @@ async def _orchestration_loop(
                     if round_dirs:
                         latest_round = int(round_dirs[0])
 
-                        # Score previous round if it resolved
-                        if pending_score is not None and pending_score != latest_round:
-                            result_path = os.path.join(data_dir, "rounds", str(pending_score), "result.json")
-                            if os.path.exists(result_path):
+                        # Score previous round after enough time has passed (5+ min)
+                        if pending_score is not None:
+                            age = time.time() - pending_score
+                            if age >= 300:  # 5 minutes since round opened
                                 await _score_round(pending_score, data_dir, runner, fast_fail, agents_dir)
                                 rounds_since_tournament += 1
                                 rounds_since_evolution += 1
