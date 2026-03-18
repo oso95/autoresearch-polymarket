@@ -65,8 +65,39 @@ class RetentionManager:
             return True, int(free_mb)
         return True, int(free_mb)
 
+    def compact_shared_knowledge(self, max_discoveries: int = 30):
+        """Archive old discovery files to prevent unbounded growth.
+
+        Keeps the last max_discoveries files + all non-discovery files (approaches.md, etc.).
+        Old discoveries are concatenated into a single archive file.
+        """
+        shared_dir = os.path.join(self.data_dir, "shared_knowledge")
+        if not os.path.isdir(shared_dir):
+            return
+
+        discovery_files = sorted([
+            f for f in os.listdir(shared_dir)
+            if f.startswith("discovery-") and os.path.isfile(os.path.join(shared_dir, f))
+        ])
+
+        if len(discovery_files) <= max_discoveries:
+            return
+
+        # Archive old discoveries
+        to_archive = discovery_files[:-max_discoveries]
+        archive_path = os.path.join(shared_dir, "archived-discoveries.md")
+        with open(archive_path, "a") as archive:
+            for fname in to_archive:
+                fpath = os.path.join(shared_dir, fname)
+                with open(fpath) as f:
+                    archive.write(f"\n\n---\n## {fname}\n{f.read()}")
+                os.unlink(fpath)
+
+        logger.info(f"Compacted shared knowledge: archived {len(to_archive)} old discoveries, kept {max_discoveries}")
+
     def run_cleanup(self):
         self.archive_old_rounds()
+        self.compact_shared_knowledge()
         ok, free_mb = self.check_disk_space()
         if not ok:
             logger.critical(f"Disk critically low: {free_mb}MB free. Pausing data collection.")
