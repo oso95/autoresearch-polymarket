@@ -153,6 +153,121 @@ Identify the current market regime (trending vs ranging) and adapt strategy acco
 - Regime transition: 50%
 """,
     },
+    {
+        "name": "yi-jing-oracle",
+        "strategy": """# Yi Jing Oracle
+
+## Focus
+Use the ancient I Ching (Yi Jing) system to interpret market energy patterns.
+The 64 hexagrams map to market states — use price data as the "casting" method.
+
+## Data Sources
+- Primary: `binance_candles_5m` (last 6 candles = 6 lines of a hexagram)
+- Secondary: `polymarket_orderbook` (yin/yang energy of market sentiment)
+
+## Decision Logic
+1. Cast a hexagram from the last 6 candle closes:
+   - For each candle: if close > open → Yang (solid line, value 1)
+   - If close < open → Yin (broken line, value 0)
+   - Build hexagram from oldest (bottom) to newest (top)
+
+2. Interpret the hexagram pattern:
+   - All Yang (111111) = Hexagram 1 (Creative/Qian) → Strong UP continuation
+   - All Yin (000000) = Hexagram 2 (Receptive/Kun) → Strong DOWN continuation
+   - Mixed patterns: look at the upper/lower trigrams
+   - Upper trigram (last 3 candles) represents the future tendency
+   - If upper trigram is mostly Yang → predict UP
+   - If upper trigram is mostly Yin → predict DOWN
+
+3. Moving lines (volume-weighted):
+   - Candles with unusually high volume are "moving lines" → they change
+   - A Yang moving line becomes Yin (reversal signal)
+   - This adds a contrarian element to strong trends
+
+## Confidence
+- Clear hexagram (5+ lines same): 70%
+- Mixed hexagram with clear upper trigram: 60%
+- Ambiguous: 50%
+
+## Philosophy
+Markets, like nature, follow cyclical patterns. The Yi Jing captures the dynamic
+between expansion (yang/up) and contraction (yin/down). At 5-minute timeframes,
+these cycles are rapid and the I Ching may detect pattern shifts that pure
+technical analysis misses.
+""",
+    },
+    {
+        "name": "fibonacci-spiral",
+        "strategy": """# Fibonacci Spiral
+
+## Focus
+Use Fibonacci ratios and sequences to predict price direction based on
+natural mathematical patterns in market structure.
+
+## Data Sources
+- Primary: `binance_candles_5m` (price levels and retracement zones)
+- Secondary: `polymarket_orderbook` (golden ratio in bid/ask distribution)
+
+## Decision Logic
+1. Identify the recent swing high and swing low from last 20 candles
+2. Calculate Fibonacci retracement levels:
+   - 0.236, 0.382, 0.500, 0.618, 0.786
+3. Determine where current price sits relative to these levels:
+   - Price near 0.618 retracement (golden ratio) from a low → likely reversal UP
+   - Price near 0.618 retracement from a high → likely reversal DOWN
+   - Price breaking through 0.786 → trend continuation in that direction
+4. Check for Fibonacci time zones:
+   - Count candles since last significant move
+   - Fibonacci numbers (1, 2, 3, 5, 8, 13, 21) candles after a move often see reversals
+5. Golden ratio in volume:
+   - If buy_volume / sell_volume ≈ 1.618 → strong directional signal
+
+## Confidence
+- Price at key Fibonacci level + time zone alignment: 72%
+- Price at key level only: 60%
+- No Fibonacci alignment: 50%
+""",
+    },
+    {
+        "name": "crowd-psychology",
+        "strategy": """# Crowd Psychology
+
+## Focus
+Model the psychological state of market participants using behavioral finance
+principles. Markets are driven by fear, greed, and herding behavior.
+
+## Data Sources
+- Primary: `polymarket_orderbook` (sentiment revealed by odds/positioning)
+- Secondary: `binance_candles_5m` (panic/euphoria patterns in price action)
+- Tertiary: `polling/long_short_ratio`, `polling/funding_rate` (positioning extremes)
+
+## Decision Logic
+1. Fear/Greed assessment:
+   - Large red candle + volume spike = FEAR event → predict UP (fear is often a bottom)
+   - Large green candle + volume spike = GREED event → predict DOWN (greed is often a top)
+   - Small candles + low volume = APATHY → follow the prevailing trend
+
+2. Herding detection:
+   - If long_short_ratio > 1.5 → everyone is long → herd is too bullish → DOWN
+   - If long_short_ratio < 0.67 → everyone is short → herd is too bearish → UP
+   - Extreme funding rates confirm herding
+
+3. Anchoring bias:
+   - Traders anchor to round numbers ($74,000, $74,500, etc.)
+   - Price near a round number from below → resistance → DOWN
+   - Price near a round number from above → support → UP
+
+4. Recency bias exploitation:
+   - After 3+ consecutive same-direction candles, traders expect continuation
+   - But at 5-min timeframes, 4+ consecutive candles often mean-revert
+   - Fade runs of 4+ candles
+
+## Confidence
+- Multiple psychological signals aligned: 70%
+- Single strong signal: 60%
+- No clear psychological pattern: 50%
+""",
+    },
 ]
 
 
