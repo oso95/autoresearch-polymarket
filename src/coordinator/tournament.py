@@ -1,0 +1,95 @@
+# src/coordinator/tournament.py
+import json
+import os
+import time
+import logging
+from dataclasses import asdict
+
+from src.config import Config
+from src.coordinator.leaderboard import build_leaderboard
+from src.coordinator.spawner import AgentSpawner, SEED_STRATEGIES
+from src.runner.agent_runner import AgentRunner
+from src.io_utils import atomic_write_json, atomic_append_jsonl
+
+logger = logging.getLogger(__name__)
+
+INITIAL_SCREENING_KILL_RATE = 0.30
+
+class Tournament:
+    def __init__(self, config: Config, spawner: AgentSpawner, runner: AgentRunner, data_dir: str):
+        self.config = config
+        self.spawner = spawner
+        self.runner = runner
+        self.data_dir = data_dir
+        self._graveyard_dir = os.path.join(data_dir, "coordinator", "graveyard")
+
+    def should_kill(self, agent_name: str) -> bool:
+        win_rate, total = self.runner.get_agent_win_rate(agent_name)
+        if total > self.config.initial_screening_rounds and win_rate < INITIAL_SCREENING_KILL_RATE:
+            return True
+        if total >= self.config.kill_min_rounds and win_rate < self.config.kill_threshold_win_rate:
+            return True
+        return False
+
+    def run_cycle(self) -> dict:
+        agents = self.runner.discover_agents()
+        if not agents:
+            return {"action": "none", "reason": "no agents"}
+
+        agent_stats = {}
+        for name in agents:
+            wr, total = self.runner.get_agent_win_rate(name)
+            streak = self.runner.get_losing_streak(name)
+            agent_stats[name] = {"win_rate": wr, "total_rounds": total, "losing_streak": streak}
+
+        board = build_leaderboard(agent_stats)
+        leaderboard_path = os.path.join(self.data_dir, "coordinator", "leaderboard.json")
+        atomic_write_json(leaderboard_path, {"entries": [asdict(e) for e in board], "updated_at": int(time.time() * 1000)})
+
+        actions = []
+
+        alive = list(agents)
+        for entry in reversed(board):
+            if len(alive) <= self.config.min_agents:
+                break
+            if self.should_kill(entry.agent_name):
+                self.spawner.retire_agent(entry.agent_name, self._graveyard_dir)
+                alive.remove(entry.agent_name)
+                actions.append({"type": "kill", "agent": entry.agent_name, "win_rate": entry.win_rate})
+
+        seed_idx = 0
+        while len(alive) < self.config.min_agents and seed_idx < len(SEED_STRATEGIES):
+            name = self.spawner.spawn_from_seed(SEED_STRATEGIES[seed_idx])
+            alive.append(name)
+            actions.append({"type": "spawn", "agent": name, "seed": SEED_STRATEGIES[seed_idx]["name"]})
+            seed_idx += 1
+
+        if len(alive) < self.config.max_agents and board:
+            top = board[0]
+            if top.total_rounds >= 10:
+                mutation = f"Experiment with variation of {top.agent_name}'s approach"
+                clone_name = self.spawner.clone_agent(top.agent_name, mutation)
+                alive.append(clone_name)
+                actions.append({"type": "clone", "source": top.agent_name, "clone": clone_name})
+
+        alerts_path = os.path.join(self.data_dir, "coordinator", "alerts.jsonl")
+        for entry in board:
+            if entry.proven:
+                atomic_append_jsonl(alerts_path, {
+                    "type": "proven_strategy", "agent": entry.agent_name,
+                    "win_rate": entry.win_rate, "total_rounds": entry.total_rounds,
+                    "timestamp": int(time.time() * 1000),
+                })
+
+        log_path = os.path.join(self.data_dir, "coordinator", "tournament_log.tsv")
+        for action in actions:
+            line = f"{int(time.time())}\t{action['type']}\t{json.dumps(action)}\n"
+            with open(log_path, "a") as f:
+                f.write(line)
+
+        return {"actions": actions, "leaderboard": [asdict(e) for e in board]}
+
+    def spawn_initial_agents(self):
+        for seed in SEED_STRATEGIES[:self.config.min_agents]:
+            self.spawner.spawn_from_seed(seed)
+        logger.info(f"Spawned {self.config.min_agents} initial seed agents")
