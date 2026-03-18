@@ -5,6 +5,31 @@ import os
 import sys
 import time
 
+CREATIVE_KEYWORDS = {"yi-jing", "fibonacci", "crowd-psychology", "tarot", "gematria", "astro"}
+
+def _agent_type(agent_dir: str, name: str) -> str:
+    """Classify agent type for dashboard display."""
+    config_path = os.path.join(agent_dir, "agent_config.json")
+    agent_config = {}
+    if os.path.exists(config_path):
+        try:
+            agent_config = json.load(open(config_path))
+        except Exception:
+            pass
+
+    if agent_config.get("mirror"):
+        return "MIRROR"
+    if "ensemble" in name:
+        return "ENSEMBLE"
+    if any(kw in name for kw in CREATIVE_KEYWORDS):
+        return "CREATIVE"
+    if agent_config.get("model") and agent_config["model"] != "haiku":
+        return f"M:{agent_config['model'][:3]}"
+    if "clone" in name:
+        return "CLONE"
+    return "SEED"
+
+
 def main():
     project_dir = sys.argv[1] if len(sys.argv) > 1 else "./live-run"
     data_dir = os.path.join(project_dir, "data")
@@ -30,8 +55,8 @@ def main():
     print(f"Rounds: {len(rounds)}")
 
     # Agent leaderboard
-    print(f"\n{'Agent':<35} {'Pred':>5} {'Scored':>7} {'Wins':>5} {'WR':>6} {'Streak':>7}")
-    print("-" * 70)
+    print(f"\n{'Agent':<35} {'Type':>8} {'Pred':>5} {'Scored':>7} {'Wins':>5} {'WR':>6} {'Streak':>7}")
+    print("-" * 78)
 
     agent_stats = []
     for name in sorted(os.listdir(agents_dir)):
@@ -40,6 +65,7 @@ def main():
             continue
         pred_path = os.path.join(agent_dir, "predictions.jsonl")
         if not os.path.exists(pred_path):
+            agent_stats.append((name, 0, 0, 0, 0, "-", _agent_type(agent_dir, name)))
             continue
         preds = []
         with open(pred_path) as f:
@@ -62,12 +88,18 @@ def main():
             else:
                 break
         streak_str = f"{streak}{streak_type}" if streak else "-"
-        agent_stats.append((name, len(preds), len(scored), wins, wr, streak_str))
+        agent_stats.append((name, len(preds), len(scored), wins, wr, streak_str, _agent_type(agent_dir, name)))
 
     agent_stats.sort(key=lambda x: x[4], reverse=True)
-    for name, total, scored, wins, wr, streak in agent_stats:
+    for name, total, scored, wins, wr, streak, atype in agent_stats:
         short_name = name[:34]
-        print(f"{short_name:<35} {total:>5} {scored:>7} {wins:>5} {wr:>5.0f}% {streak:>7}")
+        print(f"{short_name:<35} {atype:>8} {total:>5} {scored:>7} {wins:>5} {wr:>5.0f}% {streak:>7}")
+
+    # Summary by type
+    type_counts = {}
+    for _, _, _, _, _, _, atype in agent_stats:
+        type_counts[atype] = type_counts.get(atype, 0) + 1
+    print(f"\nAgent types: {', '.join(f'{t}={c}' for t, c in sorted(type_counts.items()))}")
 
     # Evolution history
     print(f"\n--- Evolution History ---")
