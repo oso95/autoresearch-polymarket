@@ -70,9 +70,14 @@ def get_agent_stats() -> list[dict]:
             with open(cp) as f:
                 config = json.load(f)
 
+        # Compute recent WR (last 15 rounds) for regime-shift detection
+        recent = scored[-15:] if len(scored) >= 15 else scored
+        recent_wr = sum(1 for p in recent if p["correct"]) / len(recent) if recent else 0
+
         stats.append({
             "name": name,
             "win_rate": wr,
+            "recent_wr": recent_wr,
             "rounds": len(scored),
             "wins": wins,
             "mirror": config.get("mirror", False),
@@ -124,8 +129,22 @@ async def run_factory_cycle(cycle_num: int):
     if proven:
         best = max(proven, key=lambda s: s["win_rate"])
         worst = min(proven, key=lambda s: s["win_rate"])
+        best_recent = max(proven, key=lambda s: s["recent_wr"])
         logger.info(f"  Best proven: {best['name']} ({best['win_rate']:.1%}, {best['rounds']}r)")
+        logger.info(f"  Best RECENT: {best_recent['name']} ({best_recent['recent_wr']:.1%} last 15r)")
         logger.info(f"  Worst proven: {worst['name']} ({worst['win_rate']:.1%}, {worst['rounds']}r)")
+
+        # Regime-shift detection: flag agents with big gap between overall and recent
+        degrading = [s for s in proven if s["win_rate"] - s["recent_wr"] > 0.15]
+        improving = [s for s in proven if s["recent_wr"] - s["win_rate"] > 0.10]
+        if degrading:
+            logger.warning(f"  REGIME SHIFT: {len(degrading)} agents degrading (overall >> recent):")
+            for s in degrading:
+                logger.warning(f"    {s['name']}: overall={s['win_rate']:.0%} recent={s['recent_wr']:.0%}")
+        if improving:
+            logger.info(f"  IMPROVING: {len(improving)} agents gaining edge recently:")
+            for s in improving:
+                logger.info(f"    {s['name']}: overall={s['win_rate']:.0%} recent={s['recent_wr']:.0%}")
 
     # Phase 2: BACKTEST (if enough historical data)
     rounds = load_historical_rounds(DATA_DIR)
@@ -165,10 +184,11 @@ async def run_factory_cycle(cycle_num: int):
 
     # Phase 3: IDENTIFY — find agents to evolve
     logger.info("Phase 3: IDENTIFY — finding evolution targets")
+    # Use RECENT win rate for evolution targeting — overall WR can be stale
     evolve_targets = [
         s for s in stats
         if s["rounds"] >= EVOLVE_MIN_ROUNDS
-        and s["win_rate"] < EVOLVE_THRESHOLD_WR
+        and s["recent_wr"] < EVOLVE_THRESHOLD_WR
         and not s["mirror"]
         and not s["is_ensemble"]
     ]
