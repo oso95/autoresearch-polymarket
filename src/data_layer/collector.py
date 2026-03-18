@@ -81,13 +81,7 @@ class Collector:
             os.path.join(self.data_dir, "live", "polymarket_market.json"),
             {**market, "updated_at": int(time.time() * 1000)},
         )
-        # Throttle round creation — at most one every 4 minutes
-        now = time.time()
-        if now - self._last_round_time >= self._min_round_interval:
-            timestamp = int(now)
-            self.round_manager.freeze_snapshot(timestamp)
-            self._last_round_time = now
-            logger.info(f"New market detected, round {timestamp} started")
+        logger.debug(f"New market event: {market.get('market_id', '?')}")
 
     async def _on_resolved(self, result: dict):
         current = self.round_manager.current_round
@@ -191,17 +185,20 @@ class Collector:
                     await poly_market.subscribe(new_tokens)
                     known_tokens.update(new_tokens)
                     logger.info(f"Subscribed to {len(new_tokens)} new market tokens")
-
-                    # Freeze snapshot for new round (throttled)
-                    now = time.time()
-                    if now - self._last_round_time >= self._min_round_interval:
-                        timestamp = int(now)
-                        self.round_manager.freeze_snapshot(timestamp)
-                        self._last_round_time = now
-                        logger.info(f"New round {timestamp} from discovery")
             except Exception as e:
                 logger.warning(f"Market discovery loop error: {e}")
             await asyncio.sleep(120)  # Re-discover every 2 minutes
+
+    async def _round_timer_loop(self):
+        """Create a new round every 5 minutes on a fixed schedule."""
+        # Wait for initial warm-up
+        await asyncio.sleep(10)
+        while self._running:
+            timestamp = int(time.time())
+            self.round_manager.freeze_snapshot(timestamp)
+            self._last_round_time = time.time()
+            logger.info(f"=== ROUND {timestamp} === (5-minute timer)")
+            await asyncio.sleep(300)  # Exactly 5 minutes
 
     async def _heartbeat_loop(self):
         while self._running:
@@ -242,6 +239,7 @@ class Collector:
             asyncio.create_task(poller.run()),
             asyncio.create_task(self._heartbeat_loop()),
             asyncio.create_task(self._market_discovery_loop(poly_market)),
+            asyncio.create_task(self._round_timer_loop()),
         ]
 
         # Wait for initial data to arrive before signaling ready
