@@ -5,12 +5,16 @@ import logging
 import os
 import time
 
+import aiohttp
+
 from src.config import Config
 from src.io_utils import atomic_write_json
 from src.data_layer.binance_ws import BinanceWebSocket, BinanceStreams
 from src.data_layer.polymarket_ws import PolymarketMarketWS, PolymarketRTDS
 from src.data_layer.rest_poller import BinanceRestPoller
 from src.data_layer.round_manager import RoundManager
+
+GAMMA_API = "https://gamma-api.polymarket.com"
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +104,65 @@ class Collector:
             {**price, "updated_at": int(time.time() * 1000)},
         )
 
+    async def _discover_market_tokens(self) -> list[str]:
+        """Discover current BTC 5m market token IDs via Gamma API."""
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = f"{GAMMA_API}/events"
+                params = {
+                    "series_ticker": "btc-up-or-down-5m",
+                    "active": "true",
+                    "limit": "3",
+                    "order": "startDate",
+                    "ascending": "false",
+                }
+                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    events = await resp.json()
+                    token_ids = []
+                    for event in events:
+                        for market in event.get("markets", []):
+                            clob_ids = market.get("clobTokenIds")
+                            if clob_ids:
+                                token_ids.extend(clob_ids)
+                            # Store market info
+                            atomic_write_json(
+                                os.path.join(self.data_dir, "live", "polymarket_market.json"),
+                                {
+                                    "market_id": market.get("id", ""),
+                                    "condition_id": market.get("conditionId", ""),
+                                    "slug": event.get("slug", ""),
+                                    "outcomes": market.get("outcomes", []),
+                                    "outcome_prices": market.get("outcomePrices", []),
+                                    "token_ids": clob_ids or [],
+                                    "updated_at": int(time.time() * 1000),
+                                },
+                            )
+                    logger.info(f"Discovered {len(token_ids)} market token IDs from {len(events)} events")
+                    return token_ids
+        except Exception as e:
+            logger.warning(f"Market discovery failed: {e}")
+            return []
+
+    async def _market_discovery_loop(self, poly_market: PolymarketMarketWS):
+        """Periodically discover new markets and subscribe to them."""
+        known_tokens: set[str] = set()
+        while self._running:
+            try:
+                token_ids = await self._discover_market_tokens()
+                new_tokens = [t for t in token_ids if t not in known_tokens]
+                if new_tokens:
+                    await poly_market.subscribe(new_tokens)
+                    known_tokens.update(new_tokens)
+                    logger.info(f"Subscribed to {len(new_tokens)} new market tokens")
+
+                    # Freeze snapshot for new round
+                    timestamp = int(time.time())
+                    self.round_manager.freeze_snapshot(timestamp)
+                    logger.info(f"New round {timestamp} from discovery")
+            except Exception as e:
+                logger.warning(f"Market discovery loop error: {e}")
+            await asyncio.sleep(120)  # Re-discover every 2 minutes
+
     async def _heartbeat_loop(self):
         while self._running:
             self.write_heartbeat()
@@ -124,14 +187,18 @@ class Collector:
         poly_rtds = PolymarketRTDS(on_price=self._on_chainlink_price)
         poller = BinanceRestPoller(self.data_dir)
 
+        # Discover current BTC 5m market token IDs via Gamma API
+        initial_asset_ids = await self._discover_market_tokens()
+
         logger.info("Collector starting connections...")
 
         tasks = [
             asyncio.create_task(binance.connect()),
-            asyncio.create_task(poly_market.connect()),
+            asyncio.create_task(poly_market.connect(initial_asset_ids=initial_asset_ids)),
             asyncio.create_task(poly_rtds.connect()),
             asyncio.create_task(poller.run()),
             asyncio.create_task(self._heartbeat_loop()),
+            asyncio.create_task(self._market_discovery_loop(poly_market)),
         ]
 
         await asyncio.sleep(2)
