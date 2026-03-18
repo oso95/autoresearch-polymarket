@@ -101,8 +101,8 @@ class Tournament:
 
         # Auto-mirror: if an agent is extremely anti-predictive (below 35% with 20+ rounds),
         # spawn a mirror that inverts its signal — these are the most valuable mirror candidates
-        MIRROR_THRESHOLD = 0.35
-        MIRROR_MIN_ROUNDS = 20
+        MIRROR_THRESHOLD = 0.40  # Mirror any agent below 40% (inverted = 60%+)
+        MIRROR_MIN_ROUNDS = 15
         for entry in reversed(board):
             if len(alive) >= self.config.max_agents:
                 break

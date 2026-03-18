@@ -132,6 +132,11 @@ def _build_evolution_prompt(
         "- If your win rate is good (>55%), make small refinements",
         "- If your win rate is bad (<45%), consider bigger changes",
         "- If you have no data yet, keep your current strategy but add notes about what to watch for",
+        "- AVOID OVERFITTING: Don't create rules that only work for specific price levels or specific",
+        "  time periods. Focus on structural patterns (like 'mean reversion after extreme moves') rather",
+        "  than specific numbers. Your strategy will be validated on unseen data.",
+        "- Think about REGIME ROBUSTNESS: Does your strategy work in trending markets, ranging markets,",
+        "  and volatile markets? If it only works in one regime, add regime detection.",
     ])
 
     return "\n".join(parts)
