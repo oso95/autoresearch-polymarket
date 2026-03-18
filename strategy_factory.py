@@ -185,7 +185,7 @@ async def run_factory_cycle(cycle_num: int):
     # validate via actual rounds, and the next factory cycle will backtest)
     if evolve_targets:
         logger.info(f"Phase 4: EVOLVE — evolving {min(len(evolve_targets), 3)} worst agents")
-        evolver = StrategyEvolver(AGENTS_DIR, DATA_DIR, timeout_seconds=180)
+        evolver = StrategyEvolver(AGENTS_DIR, DATA_DIR, timeout_seconds=240)
 
         for s in evolve_targets[:3]:  # Max 3 agents per cycle
             agent_name = s["name"]
