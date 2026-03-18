@@ -110,6 +110,37 @@ class Collector:
             {**price, "updated_at": int(time.time() * 1000)},
         )
 
+    async def _backfill_candles(self):
+        """Fetch last 100 5-minute candles from Binance REST on startup."""
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = "https://api.binance.com/api/v3/klines"
+                params = {"symbol": "BTCUSDT", "interval": "5m", "limit": "100"}
+                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status == 451:
+                        logger.warning("Binance candle backfill geo-blocked")
+                        return
+                    raw = await resp.json()
+                    candles = []
+                    for k in raw:
+                        candles.append({
+                            "open_time": k[0], "close_time": k[6],
+                            "open": float(k[1]), "high": float(k[2]),
+                            "low": float(k[3]), "close": float(k[4]),
+                            "volume": float(k[5]), "quote_volume": float(k[7]),
+                            "trades": k[8], "taker_buy_volume": float(k[9]),
+                            "taker_buy_quote_volume": float(k[10]),
+                            "closed": True,
+                        })
+                    self._candles = candles
+                    atomic_write_json(
+                        os.path.join(self.data_dir, "live", "binance_candles_5m.json"),
+                        {"candles": candles, "updated_at": int(time.time() * 1000)},
+                    )
+                    logger.info(f"Backfilled {len(candles)} candles from Binance REST")
+        except Exception as e:
+            logger.warning(f"Candle backfill failed: {e}")
+
     async def _discover_market_tokens(self) -> list[str]:
         """Discover current BTC 5m market token IDs via Gamma API."""
         try:
@@ -196,6 +227,9 @@ class Collector:
         poly_rtds = PolymarketRTDS(on_price=self._on_chainlink_price)
         poller = BinanceRestPoller(self.data_dir)
 
+        # Backfill historical data before starting streams
+        await self._backfill_candles()
+
         # Discover current BTC 5m market token IDs via Gamma API
         initial_asset_ids = await self._discover_market_tokens()
 
@@ -210,9 +244,10 @@ class Collector:
             asyncio.create_task(self._market_discovery_loop(poly_market)),
         ]
 
-        await asyncio.sleep(2)
+        # Wait for initial data to arrive before signaling ready
+        await asyncio.sleep(5)
         self.write_status(ready=True, stale=False)
-        logger.info("Collector ready")
+        logger.info("Collector ready — data streams active")
 
         try:
             await asyncio.gather(*tasks)

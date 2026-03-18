@@ -75,8 +75,15 @@ class PolymarketMarketWS:
                         async for raw in ws:
                             if raw == "PONG":
                                 continue
-                            msg = json.loads(raw)
-                            await self._dispatch(msg)
+                            try:
+                                parsed = json.loads(raw)
+                                # Handle both single messages and arrays
+                                msgs = parsed if isinstance(parsed, list) else [parsed]
+                                for msg in msgs:
+                                    if isinstance(msg, dict):
+                                        await self._dispatch(msg)
+                            except json.JSONDecodeError:
+                                pass
                     finally:
                         hb_task.cancel()
             except (websockets.ConnectionClosed, ConnectionError, OSError) as e:
