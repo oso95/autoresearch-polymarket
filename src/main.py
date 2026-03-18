@@ -185,16 +185,19 @@ async def _run_round(
 
     agents = runner.discover_agents()
     shared_knowledge_dir = os.path.join(data_dir, "shared_knowledge")
-    logger.info(f"Round {round_timestamp}: invoking {len(agents)} agents IN PARALLEL")
+    logger.info(f"Round {round_timestamp}: invoking {len(agents)} agents (max 3 concurrent)")
 
-    # Invoke all agents concurrently
-    tasks = [
-        _invoke_single_agent(
-            agent_name, agents_dir, snapshot, predictor,
-            runner, round_timestamp, shared_knowledge_dir,
-        )
-        for agent_name in agents
-    ]
+    # Use semaphore to limit concurrent Claude CLI calls (avoid rate limits)
+    sem = asyncio.Semaphore(3)
+
+    async def _limited_invoke(agent_name):
+        async with sem:
+            return await _invoke_single_agent(
+                agent_name, agents_dir, snapshot, predictor,
+                runner, round_timestamp, shared_knowledge_dir,
+            )
+
+    tasks = [_limited_invoke(name) for name in agents]
     await asyncio.gather(*tasks, return_exceptions=True)
 
 
