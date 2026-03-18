@@ -299,24 +299,34 @@ async def _score_round(round_timestamp: int, data_dir: str, runner: AgentRunner,
     logger.info(f"Round {round_timestamp} scored: outcome={outcome}, {correct_count}/{scored_count} correct")
 
 
-async def _evolve_agents(evolver: StrategyEvolver, runner: AgentRunner, fast_fail: FastFailChecker, agents_dir: str):
-    """Run the autoresearch inner loop: evolve each agent's strategy."""
-    agents = runner.discover_agents()
-    for agent_name in agents:
-        # Only evolve agents that have enough data
-        preds = read_jsonl(os.path.join(agents_dir, agent_name, "predictions.jsonl"))
-        scored = [p for p in preds if p.get("correct") is not None]
-        if len(scored) < 3:
-            continue
+async def _evolve_single_agent(evolver: StrategyEvolver, agent_name: str, agents_dir: str):
+    """Evolve a single agent. Designed to run with limited concurrency."""
+    preds = read_jsonl(os.path.join(agents_dir, agent_name, "predictions.jsonl"))
+    scored = [p for p in preds if p.get("correct") is not None]
+    if len(scored) < 3:
+        return
 
-        logger.info(f"  Evolving {agent_name}...")
-        result = await evolver.evolve_agent(agent_name)
-        if result:
-            evolver.apply_evolution(agent_name, result)
-            change = result.get("change_description", "unknown")
-            logger.info(f"  {agent_name} evolved: {change}")
-        else:
-            logger.warning(f"  {agent_name} evolution failed (will retry next window)")
+    logger.info(f"  Evolving {agent_name}...")
+    result = await evolver.evolve_agent(agent_name)
+    if result:
+        evolver.apply_evolution(agent_name, result)
+        change = result.get("change_description", "unknown")
+        logger.info(f"  {agent_name} evolved: {change}")
+    else:
+        logger.warning(f"  {agent_name} evolution failed (will retry next window)")
+
+
+async def _evolve_agents(evolver: StrategyEvolver, runner: AgentRunner, fast_fail: FastFailChecker, agents_dir: str):
+    """Run the autoresearch inner loop: evolve agents (2 concurrent to save time)."""
+    agents = runner.discover_agents()
+    sem = asyncio.Semaphore(2)  # 2 concurrent evolutions (sonnet is heavier)
+
+    async def _limited(name):
+        async with sem:
+            return await _evolve_single_agent(evolver, name, agents_dir)
+
+    tasks = [_limited(name) for name in agents]
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def _orchestration_loop(
