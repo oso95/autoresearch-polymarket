@@ -28,6 +28,8 @@ class Collector:
         self._max_trades = 500
         self._running = False
         self._last_chainlink_price: dict | None = None
+        self._last_round_time: float = 0
+        self._min_round_interval = 240  # At least 4 min between rounds (5m markets)
 
     def init_dirs(self):
         for subdir in ["live", "polling", "history", "rounds", "coordinator", "archive"]:
@@ -79,9 +81,13 @@ class Collector:
             os.path.join(self.data_dir, "live", "polymarket_market.json"),
             {**market, "updated_at": int(time.time() * 1000)},
         )
-        timestamp = int(time.time())
-        self.round_manager.freeze_snapshot(timestamp)
-        logger.info(f"New market detected, round {timestamp} started")
+        # Throttle round creation — at most one every 4 minutes
+        now = time.time()
+        if now - self._last_round_time >= self._min_round_interval:
+            timestamp = int(now)
+            self.round_manager.freeze_snapshot(timestamp)
+            self._last_round_time = now
+            logger.info(f"New market detected, round {timestamp} started")
 
     async def _on_resolved(self, result: dict):
         current = self.round_manager.current_round
@@ -155,10 +161,13 @@ class Collector:
                     known_tokens.update(new_tokens)
                     logger.info(f"Subscribed to {len(new_tokens)} new market tokens")
 
-                    # Freeze snapshot for new round
-                    timestamp = int(time.time())
-                    self.round_manager.freeze_snapshot(timestamp)
-                    logger.info(f"New round {timestamp} from discovery")
+                    # Freeze snapshot for new round (throttled)
+                    now = time.time()
+                    if now - self._last_round_time >= self._min_round_interval:
+                        timestamp = int(now)
+                        self.round_manager.freeze_snapshot(timestamp)
+                        self._last_round_time = now
+                        logger.info(f"New round {timestamp} from discovery")
             except Exception as e:
                 logger.warning(f"Market discovery loop error: {e}")
             await asyncio.sleep(120)  # Re-discover every 2 minutes

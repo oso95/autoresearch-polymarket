@@ -16,6 +16,7 @@ from src.runner.agent_runner import AgentRunner, build_agent_context
 from src.runner.health_monitor import HealthMonitor
 from src.runner.predictor import Predictor
 from src.runner.fast_fail import FastFailChecker
+from src.runner.evolver import StrategyEvolver
 from src.io_utils import read_jsonl
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
@@ -137,6 +138,26 @@ async def _score_round(round_timestamp: int, data_dir: str, runner: AgentRunner,
     logger.info(f"Round {round_timestamp} scored: outcome={outcome}")
 
 
+async def _evolve_agents(evolver: StrategyEvolver, runner: AgentRunner, fast_fail: FastFailChecker, agents_dir: str):
+    """Run the autoresearch inner loop: evolve each agent's strategy."""
+    agents = runner.discover_agents()
+    for agent_name in agents:
+        # Only evolve agents that have enough data
+        preds = read_jsonl(os.path.join(agents_dir, agent_name, "predictions.jsonl"))
+        scored = [p for p in preds if p.get("correct") is not None]
+        if len(scored) < 3:
+            continue
+
+        logger.info(f"  Evolving {agent_name}...")
+        result = await evolver.evolve_agent(agent_name)
+        if result:
+            evolver.apply_evolution(agent_name, result)
+            change = result.get("change_description", "unknown")
+            logger.info(f"  {agent_name} evolved: {change}")
+        else:
+            logger.warning(f"  {agent_name} evolution failed (will retry next window)")
+
+
 async def _orchestration_loop(
     data_dir: str,
     agents_dir: str,
@@ -144,14 +165,16 @@ async def _orchestration_loop(
     runner: AgentRunner,
     predictor: Predictor,
     fast_fail: FastFailChecker,
+    evolver: StrategyEvolver,
     tournament: Tournament,
     retention: RetentionManager,
     monitor: HealthMonitor,
     stop_event: asyncio.Event,
 ):
-    """Main orchestration: detect rounds, invoke agents, score, run tournament."""
+    """Main orchestration: detect rounds, invoke agents, score, evolve, run tournament."""
     last_round: int | None = None
     rounds_since_tournament = 0
+    rounds_since_evolution = 0
     rounds_since_cleanup = 0
     pending_score: int | None = None
 
@@ -190,6 +213,7 @@ async def _orchestration_loop(
                             if os.path.exists(result_path):
                                 await _score_round(pending_score, data_dir, runner, fast_fail, agents_dir)
                                 rounds_since_tournament += 1
+                                rounds_since_evolution += 1
                                 rounds_since_cleanup += 1
                                 pending_score = None
 
@@ -207,9 +231,15 @@ async def _orchestration_loop(
                                 )
                                 pending_score = latest_round
 
+            # Run strategy evolution every K rounds (autoresearch inner loop)
+            if rounds_since_evolution >= config.evaluation_window_rounds:
+                logger.info(f"=== EVOLUTION WINDOW (every {config.evaluation_window_rounds} rounds) ===")
+                await _evolve_agents(evolver, runner, fast_fail, agents_dir)
+                rounds_since_evolution = 0
+
             # Run tournament cycle periodically
             if rounds_since_tournament >= config.coordinator_frequency_rounds:
-                logger.info("Running tournament cycle...")
+                logger.info("=== TOURNAMENT CYCLE ===")
                 result = tournament.run_cycle()
                 actions = result.get("actions", [])
                 for a in actions:
@@ -241,6 +271,7 @@ async def run_system(project_dir: str):
     tournament = Tournament(config, spawner, runner, data_dir)
     predictor = Predictor(timeout_seconds=config.prediction_deadline_seconds)
     fast_fail = FastFailChecker(streak_threshold=config.fast_fail_streak)
+    evolver = StrategyEvolver(agents_dir, data_dir, timeout_seconds=120)
     retention = RetentionManager(data_dir)
 
     if not runner.discover_agents():
@@ -261,7 +292,7 @@ async def run_system(project_dir: str):
     orchestration_task = asyncio.create_task(
         _orchestration_loop(
             data_dir, agents_dir, config, runner, predictor,
-            fast_fail, tournament, retention, monitor, stop_event,
+            fast_fail, evolver, tournament, retention, monitor, stop_event,
         )
     )
 
