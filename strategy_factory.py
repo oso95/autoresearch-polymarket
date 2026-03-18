@@ -179,54 +179,25 @@ async def run_factory_cycle(cycle_num: int):
     else:
         logger.info("  No agents need evolution this cycle")
 
-    # Phase 4: EVOLVE — fast-evolve underperformers
-    if evolve_targets and len(rounds) >= MIN_ROUNDS_FOR_BACKTEST:
-        logger.info(f"Phase 4: EVOLVE — fast-evolving {len(evolve_targets)} agents ({EVOLVE_ITERATIONS} iterations)")
+    # Phase 4: EVOLVE — evolve underperformers (no backtest validation during evolve
+    # to avoid rate-limiting conflicts with the live system — the live system will
+    # validate via actual rounds, and the next factory cycle will backtest)
+    if evolve_targets:
+        logger.info(f"Phase 4: EVOLVE — evolving {min(len(evolve_targets), 3)} worst agents")
         evolver = StrategyEvolver(AGENTS_DIR, DATA_DIR, timeout_seconds=180)
-        bt = Backtester(
-            agents_dir=AGENTS_DIR,
-            data_dir=DATA_DIR,
-            model="haiku",
-            timeout=90,
-            concurrency=8,
-            batch_size=10,
-        )
-        train_rounds, test_rounds = split_train_test(rounds, 0.7)
 
-        for s in evolve_targets[:3]:  # Max 3 agents per cycle to save API calls
+        for s in evolve_targets[:3]:  # Max 3 agents per cycle
             agent_name = s["name"]
             logger.info(f"  Evolving {agent_name} ({s['win_rate']:.1%})...")
 
-            for i in range(EVOLVE_ITERATIONS):
-                # Backtest before
-                before = await bt.backtest_agent(agent_name, test_rounds)
-                before_wr = before.get("win_rate", 0) if "error" not in before else 0
+            result = await evolver.evolve_agent(agent_name)
+            if not result:
+                logger.warning(f"    Evolution failed for {agent_name}")
+                continue
 
-                # Evolve
-                result = await evolver.evolve_agent(agent_name)
-                if not result:
-                    logger.warning(f"    Evolution failed for {agent_name}")
-                    break
-
-                evolver.apply_evolution(agent_name, result)
-                change = result.get("change_description", "unknown")
-
-                # Backtest after
-                after = await bt.backtest_agent(agent_name, test_rounds)
-                after_wr = after.get("win_rate", 0) if "error" not in after else 0
-
-                delta = after_wr - before_wr
-                if delta >= 0:
-                    logger.info(f"    Iter {i+1}: KEPT — {change[:60]} (test: {before_wr:.1%} → {after_wr:.1%})")
-                else:
-                    # Revert
-                    import shutil
-                    agent_dir = os.path.join(AGENTS_DIR, agent_name)
-                    prev = os.path.join(agent_dir, "strategy.md.prev")
-                    curr = os.path.join(agent_dir, "strategy.md")
-                    if os.path.exists(prev):
-                        shutil.copy2(prev, curr)
-                    logger.info(f"    Iter {i+1}: REVERTED — {change[:60]} (test: {before_wr:.1%} → {after_wr:.1%})")
+            evolver.apply_evolution(agent_name, result)
+            change = result.get("change_description", "unknown")
+            logger.info(f"    Evolved: {change[:80]}")
 
     # Phase 5: PRUNE — mirror anti-predictive, retire hopeless
     logger.info("Phase 5: PRUNE — checking for mirrors and retirements")
