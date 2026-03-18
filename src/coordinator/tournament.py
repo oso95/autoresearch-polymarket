@@ -65,7 +65,6 @@ class Tournament:
             seed_idx += 1
 
         # Clone top 2-3 agents with diverse mutations (prefer different strategy families)
-        # Clone top 2-3 agents with diverse mutations (prefer different strategy families)
         cloned_bases = set()
         mutation_ideas = [
             "Try a more aggressive threshold (lower confidence requirement)",
@@ -99,6 +98,41 @@ class Tournament:
             alive.append(clone_name)
             actions.append({"type": "clone", "source": entry.agent_name, "clone": clone_name})
             clone_count += 1
+
+        # Auto-mirror: if an agent is extremely anti-predictive (below 35% with 20+ rounds),
+        # spawn a mirror that inverts its signal — these are the most valuable mirror candidates
+        MIRROR_THRESHOLD = 0.35
+        MIRROR_MIN_ROUNDS = 20
+        for entry in reversed(board):
+            if len(alive) >= self.config.max_agents:
+                break
+            if entry.agent_name not in alive:
+                continue
+            if entry.total_rounds < MIRROR_MIN_ROUNDS:
+                continue
+            if entry.win_rate >= MIRROR_THRESHOLD:
+                continue
+            # Don't mirror a mirror
+            if "mirror" in entry.agent_name:
+                continue
+            # Check if mirror already exists
+            existing_mirrors = [a for a in alive if f"mirror-{entry.agent_name.split('-', 2)[-1]}" in a]
+            if existing_mirrors:
+                continue
+            mirror_name = self.spawner.spawn_mirror(entry.agent_name)
+            alive.append(mirror_name)
+            expected_wr = 1.0 - entry.win_rate
+            actions.append({
+                "type": "auto-mirror",
+                "source": entry.agent_name,
+                "mirror": mirror_name,
+                "source_win_rate": entry.win_rate,
+                "expected_win_rate": expected_wr,
+            })
+            logger.info(
+                f"  Auto-mirror: {entry.agent_name} ({entry.win_rate:.1%}) → "
+                f"{mirror_name} (expected ~{expected_wr:.1%})"
+            )
 
         alerts_path = os.path.join(self.data_dir, "coordinator", "alerts.jsonl")
         for entry in board:
