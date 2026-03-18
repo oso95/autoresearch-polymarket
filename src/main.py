@@ -339,6 +339,10 @@ async def _evolve_single_agent(evolver: StrategyEvolver, agent_name: str, agents
         if agent_config.get("mirror"):
             return
 
+    # Skip ensemble agents — they're voting mechanisms, not individual strategies
+    if "ensemble" in agent_name:
+        return
+
     preds = read_jsonl(os.path.join(agent_dir, "predictions.jsonl"))
     scored = [p for p in preds if p.get("correct") is not None]
     if len(scored) < 3:
