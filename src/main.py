@@ -347,6 +347,7 @@ async def _orchestration_loop(
     last_evolution_round_count = 0
     last_tournament_round_count = 0
     rounds_since_cleanup = 0
+    evolution_task: asyncio.Task | None = None
 
     logger.info("Orchestration loop started, waiting for data layer...")
 
@@ -400,11 +401,16 @@ async def _orchestration_loop(
                                     runner, predictor, fast_fail, config,
                                 )
 
-            # Run strategy evolution every K scored rounds (restart-safe)
+            # Run strategy evolution every K scored rounds (non-blocking background task)
             if scored_count > 0 and scored_count - last_evolution_round_count >= config.evaluation_window_rounds:
-                logger.info(f"=== EVOLUTION WINDOW ({scored_count} scored rounds, every {config.evaluation_window_rounds}) ===")
-                await _evolve_agents(evolver, runner, fast_fail, agents_dir)
-                last_evolution_round_count = scored_count
+                if evolution_task is None or evolution_task.done():
+                    logger.info(f"=== EVOLUTION WINDOW ({scored_count} scored rounds, every {config.evaluation_window_rounds}) ===")
+                    evolution_task = asyncio.create_task(
+                        _evolve_agents(evolver, runner, fast_fail, agents_dir)
+                    )
+                    last_evolution_round_count = scored_count
+                else:
+                    logger.info("Evolution still running from previous window, skipping")
 
             # Run tournament cycle periodically (restart-safe)
             if scored_count > 0 and scored_count - last_tournament_round_count >= config.coordinator_frequency_rounds:
