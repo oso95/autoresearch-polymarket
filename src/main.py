@@ -334,8 +334,8 @@ async def _orchestration_loop(
 ):
     """Main orchestration: detect rounds, invoke agents, score, evolve, run tournament."""
     last_round: int | None = None
-    rounds_since_tournament = 0
-    rounds_since_evolution = 0
+    last_evolution_round_count = 0
+    last_tournament_round_count = 0
     rounds_since_cleanup = 0
 
     logger.info("Orchestration loop started, waiting for data layer...")
@@ -366,13 +366,15 @@ async def _orchestration_loop(
 
                     # Score ALL rounds that are old enough and haven't been scored
                     now = time.time()
+                    scored_count = 0
                     for round_ts in all_rounds:
                         age = now - round_ts
                         result_path = os.path.join(data_dir, "rounds", str(round_ts), "result.json")
-                        if age >= 300 and not os.path.exists(result_path):
+                        if os.path.exists(result_path):
+                            scored_count += 1
+                        elif age >= 300:
                             await _score_round(round_ts, data_dir, runner, fast_fail, agents_dir)
-                            rounds_since_tournament += 1
-                            rounds_since_evolution += 1
+                            scored_count += 1
                             rounds_since_cleanup += 1
 
                     # Invoke agents for the latest round (if new)
@@ -388,20 +390,20 @@ async def _orchestration_loop(
                                     runner, predictor, fast_fail, config,
                                 )
 
-            # Run strategy evolution every K rounds (autoresearch inner loop)
-            if rounds_since_evolution >= config.evaluation_window_rounds:
-                logger.info(f"=== EVOLUTION WINDOW (every {config.evaluation_window_rounds} rounds) ===")
+            # Run strategy evolution every K scored rounds (restart-safe)
+            if scored_count > 0 and scored_count - last_evolution_round_count >= config.evaluation_window_rounds:
+                logger.info(f"=== EVOLUTION WINDOW ({scored_count} scored rounds, every {config.evaluation_window_rounds}) ===")
                 await _evolve_agents(evolver, runner, fast_fail, agents_dir)
-                rounds_since_evolution = 0
+                last_evolution_round_count = scored_count
 
-            # Run tournament cycle periodically
-            if rounds_since_tournament >= config.coordinator_frequency_rounds:
-                logger.info("=== TOURNAMENT CYCLE ===")
+            # Run tournament cycle periodically (restart-safe)
+            if scored_count > 0 and scored_count - last_tournament_round_count >= config.coordinator_frequency_rounds:
+                logger.info(f"=== TOURNAMENT CYCLE ({scored_count} scored rounds) ===")
                 result = tournament.run_cycle()
                 actions = result.get("actions", [])
                 for a in actions:
                     logger.info(f"  Tournament: {a['type']} — {json.dumps(a)}")
-                rounds_since_tournament = 0
+                last_tournament_round_count = scored_count
 
             # Run cleanup periodically (every ~50 rounds ≈ 4 hours)
             if rounds_since_cleanup >= 50:
