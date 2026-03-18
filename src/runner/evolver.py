@@ -216,10 +216,10 @@ class StrategyEvolver:
     # Use sonnet for evolution — needs reasoning but shouldn't be too slow
     EVOLUTION_MODEL = "sonnet"
 
-    def __init__(self, agents_dir: str, data_dir: str, timeout_seconds: int = 120):
+    def __init__(self, agents_dir: str, data_dir: str, timeout_seconds: int = 180):
         self.agents_dir = agents_dir
         self.data_dir = data_dir
-        self.timeout = timeout_seconds
+        self.timeout = timeout_seconds  # 3 min for sonnet evolution
 
     async def evolve_agent(self, agent_name: str) -> dict | None:
         """
