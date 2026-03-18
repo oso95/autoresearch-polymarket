@@ -118,7 +118,8 @@ def _build_evolution_prompt(
         '  "new_scripts": {',
         '    "script_name.py": "script content"',
         '  },',
-        '  "delete_scripts": ["old_script.py"]',
+        '  "delete_scripts": ["old_script.py"],',
+        '  "shared_discovery": "optional: if you found something useful that other agents should know, write it here"',
         "}",
         "```",
         "",
@@ -126,6 +127,7 @@ def _build_evolution_prompt(
         "- strategy_md must be the COMPLETE updated strategy, not a diff",
         "- new_scripts can add or overwrite scripts (use same name to overwrite)",
         "- delete_scripts lists scripts to remove (optional)",
+        "- shared_discovery: if you discovered a pattern, signal, or insight that could help ALL agents, share it here. It goes to the shared knowledge base.",
         "- Make ONE focused change, not many changes at once",
         "- If your win rate is good (>55%), make small refinements",
         "- If your win rate is bad (<45%), consider bigger changes",
@@ -348,6 +350,18 @@ class StrategyEvolver:
 
         change = result.get("change_description", "no description")
         logger.info(f"Evolved {agent_name}: {change}")
+
+        # Write shared discovery if present
+        discovery = result.get("shared_discovery", "")
+        if discovery and len(discovery) > 10:
+            shared_dir = os.path.join(self.data_dir, "shared_knowledge")
+            os.makedirs(shared_dir, exist_ok=True)
+            import time as _time
+            ts = _time.strftime("%Y%m%d-%H%M%S")
+            discovery_path = os.path.join(shared_dir, f"discovery-{agent_name}-{ts}.md")
+            with open(discovery_path, "w") as f:
+                f.write(f"# Discovery from {agent_name}\n\n{discovery}\n")
+            logger.info(f"  {agent_name} shared a discovery to shared_knowledge/")
 
         # Append to results.tsv
         results_path = os.path.join(agent_dir, "results.tsv")
