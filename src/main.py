@@ -169,6 +169,20 @@ async def _run_round(
     with open(snapshot_path) as f:
         snapshot = json.load(f)
 
+    # Trim snapshot to reduce token usage — agents don't need 100 candles
+    if "binance_candles_5m" in snapshot:
+        candles = snapshot["binance_candles_5m"].get("candles", [])
+        snapshot["binance_candles_5m"]["candles"] = candles[-20:]  # Last 20 only
+    # Trim trades to last 50
+    if "binance_trades_recent" in snapshot:
+        trades = snapshot["binance_trades_recent"].get("trades", [])
+        snapshot["binance_trades_recent"]["trades"] = trades[-50:]
+    # Trim polling data to last 5 records each
+    if "polling" in snapshot and isinstance(snapshot["polling"], dict):
+        for key, val in snapshot["polling"].items():
+            if isinstance(val, dict) and "data" in val:
+                val["data"] = val["data"][-5:]
+
     agents = runner.discover_agents()
     shared_knowledge_dir = os.path.join(data_dir, "shared_knowledge")
     logger.info(f"Round {round_timestamp}: invoking {len(agents)} agents IN PARALLEL")
