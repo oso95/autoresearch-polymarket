@@ -129,6 +129,7 @@ async def run_factory_cycle(cycle_num: int):
 
     # Phase 2: BACKTEST (if enough historical data)
     rounds = load_historical_rounds(DATA_DIR)
+    bt_results = []
     if len(rounds) < MIN_ROUNDS_FOR_BACKTEST:
         logger.info(f"  Only {len(rounds)} rounds — need {MIN_ROUNDS_FOR_BACKTEST} for backtest, skipping")
     else:
@@ -223,8 +224,24 @@ async def run_factory_cycle(cycle_num: int):
 
     logger.info(f"  {total_agents} agents after pruning")
 
-    # Phase 6: UPDATE INSIGHTS — refresh tournament-insights.md with latest data
-    logger.info("Phase 6: UPDATE — refreshing shared insights")
+    # Phase 6: CORRELATE — compare backtest vs live win rates
+    if bt_results:
+        logger.info("Phase 6: CORRELATE — backtest vs live accuracy")
+        bt_map = {r["agent"]: r["win_rate"] for r in bt_results if "error" not in r}
+        live_map = {s["name"]: s["win_rate"] for s in stats if s["rounds"] >= 20}
+        correlations = []
+        for name in bt_map:
+            if name in live_map:
+                correlations.append((name, live_map[name], bt_map[name], bt_map[name] - live_map[name]))
+        if correlations:
+            correlations.sort(key=lambda x: abs(x[3]), reverse=True)
+            avg_gap = sum(abs(c[3]) for c in correlations) / len(correlations)
+            logger.info(f"  Avg |backtest - live| gap: {avg_gap:.1%} ({len(correlations)} agents)")
+            for name, live_wr, bt_wr, gap in correlations[:5]:
+                logger.info(f"    {name}: live={live_wr:.0%} bt={bt_wr:.0%} gap={gap:+.0%}")
+
+    # Phase 7: UPDATE INSIGHTS — refresh tournament-insights.md with latest data
+    logger.info("Phase 7: UPDATE — refreshing shared insights")
     _update_tournament_insights(stats, rounds)
 
     # Phase 7: SUMMARY
