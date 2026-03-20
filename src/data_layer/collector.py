@@ -608,6 +608,22 @@ class Collector:
             self.write_heartbeat()
             await asyncio.sleep(5)
 
+    async def _supervise_loop(self, name: str, factory):
+        """Run a long-lived task and restart it if it exits unexpectedly."""
+        while self._running:
+            try:
+                await factory()
+                if self._running:
+                    logger.warning(f"{name} exited unexpectedly; restarting in 1s")
+                    await asyncio.sleep(1)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                if not self._running:
+                    break
+                logger.exception(f"{name} crashed: {e}")
+                await asyncio.sleep(1)
+
     async def run(self, config: Config | None = None):
         self.init_dirs()
         self._running = True
@@ -650,12 +666,15 @@ class Collector:
         logger.info("Collector starting connections...")
 
         tasks = [
-            asyncio.create_task(binance.connect()),
-            asyncio.create_task(poly_market.connect(initial_asset_ids=initial_asset_ids)),
-            asyncio.create_task(poly_rtds.connect()),
-            asyncio.create_task(poller.run()),
-            asyncio.create_task(self._heartbeat_loop()),
-            asyncio.create_task(self._market_discovery_loop(poly_market)),
+            asyncio.create_task(self._supervise_loop("Binance WS", binance.connect)),
+            asyncio.create_task(self._supervise_loop(
+                "Polymarket Market WS",
+                lambda: poly_market.connect(initial_asset_ids=list(self._current_poly_market.get("token_ids", initial_asset_ids)) if self._current_poly_market else initial_asset_ids),
+            )),
+            asyncio.create_task(self._supervise_loop("Polymarket RTDS", poly_rtds.connect)),
+            asyncio.create_task(self._supervise_loop("Binance REST poller", poller.run)),
+            asyncio.create_task(self._supervise_loop("Collector heartbeat", self._heartbeat_loop)),
+            asyncio.create_task(self._supervise_loop("Market discovery", lambda: self._market_discovery_loop(poly_market))),
         ]
 
         # Wait for initial data to arrive before signaling ready

@@ -33,3 +33,15 @@ def test_context_prioritizes_unseen_posts(tmp_path):
     first_new = context.find(post2["post_id"])
     assert first_new != -1 and first_seen != -1
     assert first_new < first_seen
+
+
+def test_default_context_includes_full_content_for_all_posts(tmp_path):
+    shared_dir = tmp_path / "shared_knowledge"
+    forum = SharedKnowledgeForum(str(shared_dir))
+    forum.create_post("agent-001", "Post one", "full body one")
+    forum.create_post("agent-002", "Post two", "full body two")
+
+    context = forum.build_context("agent-999")
+    assert "## Full Forum Posts" in context
+    assert "full body one" in context
+    assert "full body two" in context

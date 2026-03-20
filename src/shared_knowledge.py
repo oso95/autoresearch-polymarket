@@ -133,7 +133,7 @@ class SharedKnowledgeForum:
                 return f.read().strip()
         return ""
 
-    def build_context(self, agent_name: str, include_full_posts: int = 3, include_index_posts: int = 8) -> str:
+    def build_context(self, agent_name: str, include_full_posts: int | None = None, include_index_posts: int = 8) -> str:
         self.ensure()
         index = self._read_index()
         posts = index.get("posts", [])
@@ -156,9 +156,11 @@ class SharedKnowledgeForum:
             if excerpt:
                 lines.append(f"  Excerpt: {excerpt}")
 
+        full_count = len(ranked) if include_full_posts is None else include_full_posts
+
         lines.append("")
-        lines.append("## Top Forum Posts")
-        for post in ranked[:include_full_posts]:
+        lines.append("## Full Forum Posts")
+        for post in ranked[:full_count]:
             lines.append(f"### {post['post_id']} — {post.get('title','')}")
             lines.append(self._read_post_body(post) or post.get("excerpt", ""))
             comments = self._comments_for_post(post["post_id"])

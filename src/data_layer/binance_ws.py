@@ -4,6 +4,7 @@ import logging
 from dataclasses import dataclass
 
 import websockets
+from websockets.exceptions import InvalidStatus
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,7 @@ class BinanceWebSocket:
         self._on_trade = on_trade
         self._ws = None
         self._running = False
+        self._geo_blocked = False
 
     async def connect(self):
         self._running = True
@@ -57,6 +59,7 @@ class BinanceWebSocket:
             try:
                 async with websockets.connect(self.streams.url) as ws:
                     self._ws = ws
+                    self._geo_blocked = False
                     backoff = 1
                     logger.info("Binance WS connected")
                     async for raw in ws:
@@ -69,6 +72,19 @@ class BinanceWebSocket:
                             await self._on_depth(parse_depth_message(data))
                         elif event == "trade" and self._on_trade:
                             await self._on_trade(data)
+            except InvalidStatus as e:
+                status_code = getattr(getattr(e, "response", None), "status_code", None)
+                if status_code == 451:
+                    if not self._geo_blocked:
+                        logger.warning("Binance WS geo-blocked (HTTP 451); disabling websocket stream and relying on REST/polymarket data")
+                        self._geo_blocked = True
+                    await asyncio.sleep(300)
+                    continue
+                if not self._running:
+                    break
+                logger.warning(f"Binance WS rejected connection: {e}. Reconnecting in {backoff}s")
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 60)
             except (websockets.ConnectionClosed, ConnectionError, OSError) as e:
                 if not self._running:
                     break

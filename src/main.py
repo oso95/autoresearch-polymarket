@@ -325,7 +325,19 @@ async def _invoke_single_agent(
         result["reasoning"], strategy_version,
         execution_quote=execution_quote,
     )
-    logger.info(f"  {agent_name}: {result['prediction']} (confidence {result['confidence']:.0%}) — {result['reasoning'][:80]}")
+    price_bits = []
+    if execution_quote:
+        if execution_quote.get("entry_price") is not None:
+            price_bits.append(f"entry {float(execution_quote['entry_price']):.2f}")
+        if execution_quote.get("entry_price_source"):
+            price_bits.append(str(execution_quote["entry_price_source"]))
+        if execution_quote.get("quote_used_at"):
+            price_bits.append(f"quote_at {execution_quote['quote_used_at']}")
+    price_suffix = f" [{' | '.join(price_bits)}]" if price_bits else ""
+    logger.info(
+        f"  {agent_name}: {result['prediction']} (confidence {result['confidence']:.0%})"
+        f"{price_suffix} — {result['reasoning'][:80]}"
+    )
 
 
 async def _run_round(
