@@ -22,6 +22,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(__file__))
 
+from src.codex_cli import DEFAULT_PREDICTION_MODEL, normalize_model_name
 from src.runner.backtester import Backtester, load_historical_rounds, split_train_test
 from src.runner.evolver import StrategyEvolver
 from src.runner.agent_runner import AgentRunner
@@ -81,7 +82,7 @@ def get_agent_stats() -> list[dict]:
             "rounds": len(scored),
             "wins": wins,
             "mirror": config.get("mirror", False),
-            "model": config.get("model", "haiku"),
+            "model": normalize_model_name(config.get("model"), DEFAULT_PREDICTION_MODEL),
             "is_ensemble": "ensemble" in name,
         })
     return stats
@@ -166,7 +167,7 @@ async def run_factory_cycle(cycle_num: int):
             bt = Backtester(
                 agents_dir=AGENTS_DIR,
                 data_dir=DATA_DIR,
-                model="haiku",
+                model=DEFAULT_PREDICTION_MODEL,
                 timeout=90,
                 concurrency=8,
                 batch_size=10,
@@ -204,7 +205,7 @@ async def run_factory_cycle(cycle_num: int):
     if evolve_targets:
         targets = evolve_targets[:3]
         logger.info(f"Phase 4: EVOLVE — evolving {len(targets)} agents in parallel")
-        evolver = StrategyEvolver(AGENTS_DIR, DATA_DIR, timeout_seconds=240)
+        evolver = StrategyEvolver(AGENTS_DIR, DATA_DIR, timeout_seconds=900, evaluation_window=5)
 
         async def _evolve_one(s):
             agent_name = s["name"]

@@ -25,7 +25,17 @@ import os
 import shutil
 import re
 
-from src.io_utils import read_jsonl
+from src.codex_cli import DEFAULT_EVOLUTION_MODEL, run_codex_prompt
+from src.io_utils import atomic_write_json, read_jsonl
+from src.memory_utils import (
+    append_memory_entry,
+    append_memory_outcome,
+    current_memory_version,
+    next_memory_version,
+    read_memory_bundle,
+    set_current_memory_version,
+)
+from src.shared_knowledge import SharedKnowledgeForum, build_shared_knowledge_context, ensure_shared_knowledge_forum
 
 logger = logging.getLogger(__name__)
 
@@ -107,19 +117,28 @@ def _build_evolution_prompt(
         "- Changing your decision logic",
         "- Creating a new analysis script",
         "- Completely rethinking your approach if win rate is bad",
+        "- Prefer deterministic Python scripts in `scripts/` when a reusable signal can be computed mechanically",
+        "- The runtime executes `.py` scripts before falling back to the model, so script-first edges are preferred",
         "",
         "## Output Format",
+        "",
+        "Do not run shell commands or modify files yourself. Respond with JSON only.",
         "",
         "Respond with a JSON object containing your changes:",
         "```json",
         "{",
         '  "change_description": "one sentence describing what you changed and why",',
+        '  "change_summary": "short description of what changed",',
+        '  "change_why": "short explanation of why this change was chosen",',
         '  "strategy_md": "your complete updated strategy.md content",',
         '  "new_scripts": {',
         '    "script_name.py": "script content"',
         '  },',
         '  "delete_scripts": ["old_script.py"],',
+        '  "shared_discovery_title": "optional short title for a forum post",',
         '  "shared_discovery": "optional: if you found something useful that other agents should know, write it here"',
+        '  ,"shared_votes": [{"post_id": "optional forum post id", "vote": "up or down", "reason": "optional short reason"}]',
+        '  ,"shared_comments": [{"post_id": "optional forum post id", "comment": "optional short comment"}]',
         "}",
         "```",
         "",
@@ -127,7 +146,12 @@ def _build_evolution_prompt(
         "- strategy_md must be the COMPLETE updated strategy, not a diff",
         "- new_scripts can add or overwrite scripts (use same name to overwrite)",
         "- delete_scripts lists scripts to remove (optional)",
-        "- shared_discovery: if you discovered a pattern, signal, or insight that could help ALL agents, share it here. It goes to the shared knowledge base.",
+        "- shared_discovery_title and shared_discovery create a new forum post in the shared knowledge base.",
+        "- Good forum posts are short and testable: title + claim + evidence + caveat.",
+        "- shared_votes lets you upvote/downvote existing shared knowledge posts after reviewing them.",
+        "- shared_comments lets you leave short comments on existing posts.",
+        "- Do not dump raw logs into shared_discovery. Summarize the key reusable lesson instead.",
+        "- change_summary and change_why should be concise because they are written into your long-term memory file",
         "- Make ONE focused change, not many changes at once",
         "- If your win rate is good (>55%), make small refinements",
         "- If your win rate is bad (<45%), consider bigger changes",
@@ -185,7 +209,7 @@ def _build_leaderboard_summary(data_dir: str) -> str:
 
 
 def _parse_evolution_response(response: str) -> dict | None:
-    """Parse the evolution response from Claude."""
+    """Parse the evolution response from the model."""
     # Try direct JSON parse
     try:
         data = json.loads(response)
@@ -218,18 +242,140 @@ def _parse_evolution_response(response: str) -> dict | None:
 
 
 class StrategyEvolver:
-    # Use sonnet for evolution — needs reasoning but shouldn't be too slow
-    EVOLUTION_MODEL = "sonnet"
+    # Use a stronger GPT model for evolution than the default live fallback.
+    EVOLUTION_MODEL = DEFAULT_EVOLUTION_MODEL
 
-    def __init__(self, agents_dir: str, data_dir: str, timeout_seconds: int = 180):
+    def __init__(self, agents_dir: str, data_dir: str, timeout_seconds: int = 180, evaluation_window: int = 5):
         self.agents_dir = agents_dir
         self.data_dir = data_dir
-        self.timeout = timeout_seconds  # 3 min for sonnet evolution
+        self.timeout = timeout_seconds
+        self.evaluation_window = evaluation_window
+
+    def _status_path(self, agent_name: str) -> str:
+        return os.path.join(self.agents_dir, agent_name, "status.json")
+
+    def _read_status(self, agent_name: str) -> dict:
+        path = self._status_path(agent_name)
+        if not os.path.exists(path):
+            return {}
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return {}
+
+    def _write_status(self, agent_name: str, status: dict):
+        status["updated_at"] = status.get("updated_at") or int(__import__("time").time() * 1000)
+        atomic_write_json(self._status_path(agent_name), status)
+
+    def _scripts_backup_dir(self, agent_dir: str) -> str:
+        return os.path.join(agent_dir, "scripts.prev")
+
+    def _snapshot_scripts(self, agent_dir: str):
+        scripts_dir = os.path.join(agent_dir, "scripts")
+        backup_dir = self._scripts_backup_dir(agent_dir)
+        if os.path.exists(backup_dir):
+            shutil.rmtree(backup_dir)
+        if os.path.isdir(scripts_dir):
+            shutil.copytree(scripts_dir, backup_dir)
+        else:
+            os.makedirs(backup_dir, exist_ok=True)
+
+    def _restore_previous_state(self, agent_dir: str):
+        strategy_path = os.path.join(agent_dir, "strategy.md")
+        prev_path = os.path.join(agent_dir, "strategy.md.prev")
+        scripts_dir = os.path.join(agent_dir, "scripts")
+        backup_dir = self._scripts_backup_dir(agent_dir)
+        if os.path.exists(prev_path):
+            shutil.copy2(prev_path, strategy_path)
+        if os.path.exists(scripts_dir):
+            shutil.rmtree(scripts_dir)
+        if os.path.isdir(backup_dir):
+            shutil.copytree(backup_dir, scripts_dir)
+        else:
+            os.makedirs(scripts_dir, exist_ok=True)
+
+    def _append_results_row(
+        self,
+        agent_name: str,
+        iteration: int,
+        strategy_version: str,
+        win_rate: float,
+        delta: float,
+        rounds_played: int,
+        status: str,
+        description: str,
+    ):
+        results_path = os.path.join(self.agents_dir, agent_name, "results.tsv")
+        with open(results_path, "a") as f:
+            f.write(
+                f"{iteration}\t{strategy_version}\t{win_rate:.3f}\t{delta:.3f}\t"
+                f"{rounds_played}\t{status}\t{description}\n"
+            )
+
+    def finalize_pending_experiment(self, agent_name: str) -> dict | None:
+        status = self._read_status(agent_name)
+        experiment = status.get("current_experiment")
+        if not experiment:
+            return None
+
+        pred_path = os.path.join(self.agents_dir, agent_name, "predictions.jsonl")
+        scored = [p for p in read_jsonl(pred_path) if p.get("correct") is not None]
+        eval_rounds = [
+            p for p in scored
+            if p["round"] > experiment.get("applied_at_round", -1)
+        ][:self.evaluation_window]
+
+        if len(eval_rounds) < self.evaluation_window:
+            return {"status": "pending", "rounds": len(eval_rounds)}
+
+        new_wr = sum(1 for p in eval_rounds if p["correct"]) / len(eval_rounds)
+        baseline = experiment.get("baseline_win_rate", 0.0)
+        delta = new_wr - baseline
+        keep = new_wr > baseline
+        agent_dir = os.path.join(self.agents_dir, agent_name)
+        previous_version = experiment.get("previous_memory_version", "v1.0")
+        experiment_version = experiment.get("memory_version", previous_version)
+        if not keep:
+            self._restore_previous_state(agent_dir)
+            set_current_memory_version(agent_dir, previous_version)
+
+        strategy_path = os.path.join(agent_dir, "strategy.md")
+        strategy_version = "unknown"
+        if os.path.exists(strategy_path):
+            with open(strategy_path) as f:
+                strategy_version = f"{hash(f.read()) & 0xFFFFFFFF:08x}"
+
+        status["last_action"] = "keep" if keep else "discard"
+        status["last_action_round"] = eval_rounds[-1]["round"]
+        status["current_experiment"] = None
+        status["consecutive_discards"] = 0 if keep else status.get("consecutive_discards", 0) + 1
+        status["iterations"] = max(status.get("iterations", 0), experiment.get("iteration", 0))
+        status["memory_version"] = experiment_version if keep else previous_version
+        self._write_status(agent_name, status)
+        append_memory_outcome(
+            agent_dir,
+            experiment_version,
+            "kept" if keep else "discarded",
+            f"Evaluated over {len(eval_rounds)} rounds with win rate {new_wr:.1%} (delta {delta:+.1%}).",
+            current_version=experiment_version if keep else previous_version,
+        )
+        self._append_results_row(
+            agent_name=agent_name,
+            iteration=experiment.get("iteration", status.get("iterations", 0)),
+            strategy_version=strategy_version,
+            win_rate=new_wr,
+            delta=delta,
+            rounds_played=len(eval_rounds),
+            status="keep" if keep else "discard",
+            description=experiment.get("description", "unknown"),
+        )
+        return {"status": "keep" if keep else "discard", "win_rate": new_wr, "delta": delta}
 
     async def evolve_agent(self, agent_name: str) -> dict | None:
         """
         Run the autoresearch inner loop for one agent:
-        REVIEW → IDEATE → MODIFY (all in one Claude invocation).
+        REVIEW → IDEATE → MODIFY (all in one Codex/GPT invocation).
 
         Returns the evolution result or None if failed.
         """
@@ -255,31 +401,13 @@ class StrategyEvolver:
         # Read predictions
         predictions = read_jsonl(os.path.join(agent_dir, "predictions.jsonl"))
 
-        # Read notes
-        notes = ""
-        notes_path = os.path.join(agent_dir, "notes.md")
-        if os.path.exists(notes_path):
-            with open(notes_path) as f:
-                notes = f.read()
+        # Read agent memory and supplemental notes
+        notes = read_memory_bundle(agent_dir)
 
-        # Read shared knowledge (core files + last 10 discoveries to save tokens)
         shared_knowledge_dir = os.path.join(self.data_dir, "shared_knowledge")
         if os.path.isdir(shared_knowledge_dir):
-            core_files = []
-            discovery_files = []
-            for fname in sorted(os.listdir(shared_knowledge_dir)):
-                fpath = os.path.join(shared_knowledge_dir, fname)
-                if os.path.isfile(fpath) and fname.endswith((".md", ".txt")):
-                    if fname.startswith("discovery-"):
-                        discovery_files.append((fname, fpath))
-                    else:
-                        core_files.append((fname, fpath))
-            for fname, fpath in core_files:
-                with open(fpath) as f:
-                    notes += f"\n\n## Shared Knowledge: {fname}\n{f.read()}"
-            for fname, fpath in discovery_files[-10:]:
-                with open(fpath) as f:
-                    notes += f"\n\n## Shared Knowledge: {fname}\n{f.read()}"
+            ensure_shared_knowledge_forum(shared_knowledge_dir)
+            notes += "\n\n" + build_shared_knowledge_context(shared_knowledge_dir, agent_name)
 
         # Build context
         shared_summary = _build_shared_ledger_summary(self.agents_dir, agent_name)
@@ -290,27 +418,8 @@ class StrategyEvolver:
             notes, shared_summary, lb_summary,
         )
 
-        # Invoke Claude for strategy evolution (use sonnet for deeper reasoning)
         try:
-            proc = await asyncio.wait_for(
-                asyncio.create_subprocess_exec(
-                    "claude", "-p", prompt, "--output-format", "text",
-                    "--model", self.EVOLUTION_MODEL,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    cwd=agent_dir,
-                ),
-                timeout=self.timeout,
-            )
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=self.timeout
-            )
-            response = stdout.decode("utf-8").strip()
-
-            if proc.returncode != 0:
-                logger.warning(f"Evolution failed for {agent_name}: {stderr.decode()[:200]}")
-                return None
-
+            response = await run_codex_prompt(prompt, self.EVOLUTION_MODEL, agent_dir, self.timeout)
             result = _parse_evolution_response(response)
             if result is None:
                 logger.warning(f"Could not parse evolution response for {agent_name}")
@@ -333,10 +442,12 @@ class StrategyEvolver:
         agent_dir = os.path.join(self.agents_dir, agent_name)
         strategy_path = os.path.join(agent_dir, "strategy.md")
         prev_path = os.path.join(agent_dir, "strategy.md.prev")
+        status = self._read_status(agent_name)
 
         # Phase 4: SNAPSHOT — backup current strategy
         if os.path.exists(strategy_path):
             shutil.copy2(strategy_path, prev_path)
+        self._snapshot_scripts(agent_dir)
 
         # Write new strategy
         new_strategy = result.get("strategy_md", "")
@@ -364,27 +475,82 @@ class StrategyEvolver:
                 os.unlink(script_path)
 
         change = result.get("change_description", "no description")
+        change_summary = result.get("change_summary", change)
+        change_why = result.get("change_why", change)
         logger.info(f"Evolved {agent_name}: {change}")
+
+        shared_dir = os.path.join(self.data_dir, "shared_knowledge")
+        ensure_shared_knowledge_forum(shared_dir)
+        forum = SharedKnowledgeForum(shared_dir)
 
         # Write shared discovery if present
         discovery = result.get("shared_discovery", "")
         if discovery and len(discovery) > 10:
-            shared_dir = os.path.join(self.data_dir, "shared_knowledge")
-            os.makedirs(shared_dir, exist_ok=True)
-            import time as _time
-            ts = _time.strftime("%Y%m%d-%H%M%S")
-            discovery_path = os.path.join(shared_dir, f"discovery-{agent_name}-{ts}.md")
-            with open(discovery_path, "w") as f:
-                f.write(f"# Discovery from {agent_name}\n\n{discovery}\n")
-            logger.info(f"  {agent_name} shared a discovery to shared_knowledge/")
+            discovery_title = result.get("shared_discovery_title") or f"Discovery from {agent_name}"
+            forum.create_post(agent_name, discovery_title, discovery)
+            logger.info(f"  {agent_name} shared a discovery post to the shared knowledge forum")
 
-        # Append to results.tsv
-        results_path = os.path.join(agent_dir, "results.tsv")
+        for vote in result.get("shared_votes", []):
+            if not isinstance(vote, dict):
+                continue
+            forum.vote_post(
+                agent_name,
+                str(vote.get("post_id", "")),
+                str(vote.get("vote", "")),
+                str(vote.get("reason", "")),
+            )
+
+        for comment in result.get("shared_comments", []):
+            if not isinstance(comment, dict):
+                continue
+            forum.comment_post(
+                agent_name,
+                str(comment.get("post_id", "")),
+                str(comment.get("comment", "")),
+            )
+
         scored = [p for p in read_jsonl(os.path.join(agent_dir, "predictions.jsonl"))
                   if p.get("correct") is not None]
-        wins = sum(1 for p in scored if p["correct"])
-        wr = wins / len(scored) if scored else 0.0
-        with open(results_path, "a") as f:
-            f.write(f"{len(scored)}\t{hash(new_strategy) & 0xFFFFFFFF:08x}\t{wr:.3f}\t0\t{len(scored)}\tevolve\t{change}\n")
+        recent = scored[-self.evaluation_window:] if self.evaluation_window else scored
+        wins = sum(1 for p in recent if p["correct"])
+        baseline_wr = wins / len(recent) if recent else 0.0
+        iteration = status.get("iterations", 0) + 1
+        applied_at_round = scored[-1]["round"] if scored else -1
+        previous_memory_version = status.get("memory_version", current_memory_version(agent_dir, "v1.0"))
+        memory_version = next_memory_version(previous_memory_version)
+        append_memory_entry(
+            agent_dir,
+            memory_version,
+            change_summary,
+            change_why,
+            status="pending",
+        )
+        experiment = {
+            "iteration": iteration,
+            "description": change,
+            "baseline_win_rate": baseline_wr,
+            "baseline_rounds": len(recent),
+            "applied_at_round": applied_at_round,
+            "strategy_version": f"{hash(new_strategy) & 0xFFFFFFFF:08x}",
+            "model": status.get("model", self.EVOLUTION_MODEL),
+            "memory_version": memory_version,
+            "previous_memory_version": previous_memory_version,
+        }
+        status["iterations"] = iteration
+        status["last_action"] = "evolve_pending"
+        status["last_action_round"] = applied_at_round
+        status["current_experiment"] = experiment
+        status["memory_version"] = memory_version
+        self._write_status(agent_name, status)
+        self._append_results_row(
+            agent_name=agent_name,
+            iteration=iteration,
+            strategy_version=experiment["strategy_version"],
+            win_rate=baseline_wr,
+            delta=0.0,
+            rounds_played=len(recent),
+            status="pending",
+            description=change,
+        )
 
         return True

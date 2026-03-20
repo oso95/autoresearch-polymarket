@@ -1,20 +1,24 @@
 import json
 import os
 import fcntl
+import tempfile
 from pathlib import Path
 
 
 def atomic_write_json(path: str, data: dict) -> None:
-    tmp_path = path + ".tmp"
+    tmp_path = None
     try:
         content = json.dumps(data, indent=2)
-        with open(tmp_path, "w") as f:
+        parent = Path(path).parent
+        parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(prefix=Path(path).name + ".", suffix=".tmp", dir=parent)
+        with os.fdopen(fd, "w") as f:
             f.write(content)
             f.flush()
             os.fsync(f.fileno())
-        os.rename(tmp_path, path)
-    except:
-        if os.path.exists(tmp_path):
+        os.replace(tmp_path, path)
+    except Exception:
+        if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
         raise
 

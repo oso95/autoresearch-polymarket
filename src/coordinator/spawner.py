@@ -4,28 +4,239 @@ import os
 import shutil
 import logging
 
+from src.io_utils import atomic_write_json
+from src.memory_utils import init_memory
+
 logger = logging.getLogger(__name__)
+
+ORDERBOOK_SPECIALIST_SCRIPT = """#!/usr/bin/env python3
+import json
+import sys
+
+def _book_imbalance(book):
+    bids = book.get("bids", []) or []
+    asks = book.get("asks", []) or []
+    bid_size = sum(float(level.get("size", level.get("qty", 0))) for level in bids[:5])
+    ask_size = sum(float(level.get("size", level.get("qty", 0))) for level in asks[:5])
+    total = bid_size + ask_size
+    if total <= 0:
+        return 0.5
+    return bid_size / total
+
+with open(sys.argv[1]) as f:
+    snapshot = json.load(f)
+
+poly = snapshot.get("polymarket_orderbook", {})
+binance = snapshot.get("binance_orderbook", {})
+poly_score = _book_imbalance(poly)
+binance_score = _book_imbalance(binance)
+score = poly_score * 0.7 + binance_score * 0.3
+prediction = "Up" if score >= 0.5 else "Down"
+confidence = min(0.9, 0.5 + abs(score - 0.5) * 1.6)
+print(json.dumps({
+    "prediction": prediction,
+    "confidence": confidence,
+    "reasoning": f"orderbook imbalance poly={poly_score:.2f} binance={binance_score:.2f}",
+}))
+"""
+
+MOMENTUM_TRADER_SCRIPT = """#!/usr/bin/env python3
+import json
+import sys
+
+with open(sys.argv[1]) as f:
+    snapshot = json.load(f)
+
+candles = snapshot.get("binance_candles_5m", {}).get("candles", [])
+recent = candles[-3:]
+if len(recent) < 3:
+    print(json.dumps({"prediction": "Up", "confidence": 0.5, "reasoning": "not enough candles"}))
+    raise SystemExit
+
+closes = [float(c["close"]) for c in recent]
+opens = [float(c["open"]) for c in recent]
+volumes = [float(c.get("volume", 0)) for c in recent]
+greens = sum(1 for o, c in zip(opens, closes) if c >= o)
+momentum = (closes[-1] - closes[0]) / closes[0] if closes[0] else 0.0
+volume_trend = volumes[-1] >= volumes[0]
+
+if greens == 3 and volume_trend:
+    prediction = "Up"
+    confidence = 0.75
+elif greens == 0 and volume_trend:
+    prediction = "Down"
+    confidence = 0.75
+else:
+    prediction = "Up" if momentum >= 0 else "Down"
+    confidence = 0.55 + min(abs(momentum) * 20, 0.15)
+
+print(json.dumps({
+    "prediction": prediction,
+    "confidence": min(confidence, 0.85),
+    "reasoning": f"3-candle momentum={momentum:.4f} greens={greens}/3 volume_trend={volume_trend}",
+}))
+"""
+
+DERIVATIVES_ANALYST_SCRIPT = """#!/usr/bin/env python3
+import json
+import sys
+
+def _last_value(snapshot, key, field):
+    data = snapshot.get("polling", {}).get(key, {}).get("data", [])
+    if not data:
+        return None
+    return data[-1].get(field)
+
+with open(sys.argv[1]) as f:
+    snapshot = json.load(f)
+
+funding = _last_value(snapshot, "funding_rate", "funding_rate")
+taker = _last_value(snapshot, "taker_volume", "buy_sell_ratio")
+long_short = _last_value(snapshot, "long_short_ratio", "long_short_ratio")
+
+signals = []
+score = 0.5
+if isinstance(funding, (int, float)):
+    if funding > 0.00005:
+        score -= 0.18
+        signals.append("positive funding -> fade longs")
+    elif funding < -0.00005:
+        score += 0.18
+        signals.append("negative funding -> fade shorts")
+if isinstance(taker, (int, float)):
+    if taker > 1.2:
+        score += 0.12
+        signals.append("aggressive buying")
+    elif taker < 0.8:
+        score -= 0.12
+        signals.append("aggressive selling")
+if isinstance(long_short, (int, float)):
+    if long_short > 1.2:
+        score -= 0.08
+        signals.append("crowded longs")
+    elif long_short < 0.8:
+        score += 0.08
+        signals.append("crowded shorts")
+
+prediction = "Up" if score >= 0.5 else "Down"
+confidence = 0.55 + min(abs(score - 0.5) * 1.5, 0.25)
+print(json.dumps({
+    "prediction": prediction,
+    "confidence": min(confidence, 0.8),
+    "reasoning": ", ".join(signals) if signals else "no derivatives edge, neutral fallback",
+}))
+"""
+
+CONTRARIAN_SCRIPT = """#!/usr/bin/env python3
+import json
+import sys
+
+with open(sys.argv[1]) as f:
+    snapshot = json.load(f)
+
+book = snapshot.get("polymarket_orderbook", {})
+bids = book.get("bids", []) or []
+asks = book.get("asks", []) or []
+best_bid = float(bids[0].get("price", 0)) if bids else 0.0
+best_ask = float(asks[0].get("price", 1)) if asks else 1.0
+mid = (best_bid + best_ask) / 2 if bids or asks else 0.5
+
+if mid > 0.68:
+    prediction = "Down"
+    confidence = 0.64
+    reasoning = f"consensus too bullish at {mid:.2f}"
+elif mid < 0.32:
+    prediction = "Up"
+    confidence = 0.64
+    reasoning = f"consensus too bearish at {mid:.2f}"
+else:
+    candles = snapshot.get("binance_candles_5m", {}).get("candles", [])
+    if len(candles) >= 2:
+        prediction = "Up" if float(candles[-1]["close"]) >= float(candles[-2]["close"]) else "Down"
+    else:
+        prediction = "Up"
+    confidence = 0.5
+    reasoning = f"midpoint neutral at {mid:.2f}"
+
+print(json.dumps({
+    "prediction": prediction,
+    "confidence": confidence,
+    "reasoning": reasoning,
+}))
+"""
+
+MULTI_SIGNAL_SYNTHESIZER_SCRIPT = """#!/usr/bin/env python3
+import json
+import sys
+
+with open(sys.argv[1]) as f:
+    snapshot = json.load(f)
+
+votes = []
+
+book = snapshot.get("polymarket_orderbook", {})
+bids = book.get("bids", []) or []
+asks = book.get("asks", []) or []
+if bids or asks:
+    bid_size = sum(float(level.get("size", level.get("qty", 0))) for level in bids[:5])
+    ask_size = sum(float(level.get("size", level.get("qty", 0))) for level in asks[:5])
+    total = bid_size + ask_size
+    if total > 0:
+        votes.append(bid_size / total)
+
+candles = snapshot.get("binance_candles_5m", {}).get("candles", [])
+if len(candles) >= 3:
+    closes = [float(c["close"]) for c in candles[-3:]]
+    votes.append(1.0 if closes[-1] > closes[0] else 0.0)
+
+polling = snapshot.get("polling", {})
+funding = polling.get("funding_rate", {}).get("data", [])
+if funding:
+    rate = funding[-1].get("funding_rate")
+    if isinstance(rate, (int, float)):
+        votes.append(0.25 if rate > 0.00005 else 0.75 if rate < -0.00005 else 0.5)
+
+taker = polling.get("taker_volume", {}).get("data", [])
+if taker:
+    ratio = taker[-1].get("buy_sell_ratio")
+    if isinstance(ratio, (int, float)):
+        votes.append(0.75 if ratio > 1.15 else 0.25 if ratio < 0.85 else 0.5)
+
+score = sum(votes) / len(votes) if votes else 0.5
+prediction = "Up" if score >= 0.5 else "Down"
+confidence = 0.5 + min(abs(score - 0.5), 0.3)
+print(json.dumps({
+    "prediction": prediction,
+    "confidence": confidence,
+    "reasoning": f"multi-signal average over {len(votes)} votes -> {score:.2f}",
+}))
+"""
 
 SEED_STRATEGIES = [
     {
         "name": "orderbook-specialist",
         "strategy": """# Order Book Specialist\n\n## Focus\nAnalyze Polymarket order book to predict BTC 5-minute direction.\n\n## Data Sources\n- Primary: `polymarket_orderbook` (bids/asks depth and imbalance)\n- Secondary: `binance_orderbook` (cross-reference exchange book)\n\n## Decision Logic\n1. Calculate bid/ask imbalance ratio: total_bid_volume / total_ask_volume\n2. If imbalance > 1.5 (heavy buying pressure) -> predict UP\n3. If imbalance < 0.67 (heavy selling pressure) -> predict DOWN\n4. If neutral (0.67-1.5) -> look at which side has more levels near the spread\n5. Check if large orders appeared recently (> 2x average size)\n\n## Confidence\n- Strong imbalance (>2.0 or <0.5): 80%\n- Moderate imbalance: 60%\n- Neutral: 50%\n""",
+        "scripts": {"predict.py": ORDERBOOK_SPECIALIST_SCRIPT},
     },
     {
         "name": "momentum-trader",
         "strategy": """# Momentum Trader\n\n## Focus\nUse Binance 5-minute candle patterns to predict next candle direction.\n\n## Data Sources\n- Primary: `binance_candles_5m` (last 100 candles OHLCV)\n- Secondary: `binance_orderbook`\n\n## Decision Logic\n1. Look at last 3 candles for trend direction\n2. Calculate simple momentum: (close[-1] - close[-3]) / close[-3]\n3. If last 3 candles all green AND volume increasing -> predict UP\n4. If last 3 candles all red AND volume increasing -> predict DOWN\n5. If mixed signals -> look at volume-weighted average price vs current\n6. Check for reversal patterns: long wicks, doji candles\n\n## Confidence\n- Strong 3-candle trend with volume: 75%\n- Weak trend or mixed: 55%\n- Reversal signal detected: 60% (reverse direction)\n""",
+        "scripts": {"predict.py": MOMENTUM_TRADER_SCRIPT},
     },
     {
         "name": "derivatives-analyst",
         "strategy": """# Derivatives Analyst\n\n## Focus\nUse futures market data to predict spot BTC direction.\n\n## Data Sources\n- Primary: `polling/open_interest`, `polling/funding_rate`\n- Secondary: `polling/long_short_ratio`, `polling/taker_volume`, `polling/top_trader_ratio`\n- Tertiary: `binance_candles_5m`\n\n## Decision Logic\n1. Check funding rate: extreme positive -> overleveraged longs -> potential DOWN\n2. Check funding rate: extreme negative -> overleveraged shorts -> potential UP\n3. Open interest rising + price rising -> strong UP trend continuation\n4. Open interest rising + price falling -> more shorts opening -> potential UP squeeze\n5. Taker buy/sell ratio > 1.3 -> aggressive buying -> UP\n6. Top trader long ratio > 0.6 -> smart money bullish -> UP\n\n## Handling Missing Data\nIf futures data unavailable (451 error), fall back to spot-only analysis.\n\n## Confidence\n- Multiple signals aligned: 75%\n- Single strong signal: 60%\n- Conflicting signals: 50%\n""",
+        "scripts": {"predict.py": DERIVATIVES_ANALYST_SCRIPT},
     },
     {
         "name": "contrarian",
         "strategy": """# Contrarian\n\n## Focus\nFade the Polymarket consensus when odds are extreme.\n\n## Data Sources\n- Primary: `polymarket_orderbook` (current implied probability from midpoint)\n- Secondary: `binance_candles_5m`\n\n## Decision Logic\n1. Read Polymarket midpoint price as implied probability\n2. If Up probability > 0.70 -> market very confident in UP -> predict DOWN\n3. If Down probability > 0.70 -> market very confident in DOWN -> predict UP\n4. If probabilities near 50/50 -> skip contrarian, use candle momentum instead\n5. Key insight: extreme confidence in 5-min markets is often wrong because BTC noise dominates\n\n## Confidence\n- Extreme consensus (>75%): 65% (contrarian bet)\n- Moderate consensus (60-75%): 55%\n- Near 50/50: 50% (switch to momentum)\n""",
+        "scripts": {"predict.py": CONTRARIAN_SCRIPT},
     },
     {
         "name": "multi-signal-synthesizer",
         "strategy": """# Multi-Signal Synthesizer\n\n## Focus\nCombine all available data sources with weighted voting.\n\n## Data Sources\nALL available sources, weighted by historical reliability.\n\n## Decision Logic\n1. Collect signals from all sources:\n   - Order book imbalance -> UP/DOWN signal\n   - Candle momentum (last 3) -> UP/DOWN signal\n   - Funding rate sentiment -> UP/DOWN signal\n   - Long/short ratio -> UP/DOWN signal\n   - Taker volume -> UP/DOWN signal\n   - Polymarket consensus -> contrarian signal if extreme\n\n2. Initial weights (equal: 1.0 each)\n3. For each signal, add weight to UP or DOWN bucket\n4. Predict whichever bucket has higher total weight\n5. Confidence = winning_weight / total_weight\n\n## Self-Modification Notes\nAfter each evaluation window, analyze which signals were most predictive and adjust weights.\n\n## Confidence\n- Strong agreement (>4 signals aligned): 75%\n- Moderate agreement (3 signals): 60%\n- Split signals: 50%\n""",
+        "scripts": {"predict.py": MULTI_SIGNAL_SYNTHESIZER_SCRIPT},
     },
     {
         "name": "volume-spike-detector",
@@ -684,6 +895,37 @@ class AgentSpawner:
                         pass
         return max(existing, default=0) + 1
 
+    def _infer_archetype(self, agent_name: str) -> str:
+        suffix = agent_name.split("-", 2)[-1] if "-" in agent_name else agent_name
+        while True:
+            changed = False
+            for prefix in ("clone-", "mirror-"):
+                if suffix.startswith(prefix):
+                    suffix = suffix[len(prefix):]
+                    changed = True
+            if not changed:
+                break
+        return suffix
+
+    def _write_initial_status(self, agent_dir: str, agent_name: str, status: str = "active", extra: dict | None = None):
+        payload = {
+            "agent_id": agent_name,
+            "archetype": self._infer_archetype(agent_name),
+            "total_rounds": 0,
+            "total_correct": 0,
+            "all_time_win_rate": 0.0,
+            "ew_win_rate": 0.0,
+            "last_action": "spawn",
+            "last_action_round": None,
+            "iterations": 0,
+            "consecutive_discards": 0,
+            "status": status,
+            "memory_version": "v1.0",
+        }
+        if extra:
+            payload.update(extra)
+        atomic_write_json(os.path.join(agent_dir, "status.json"), payload)
+
     def spawn_from_seed(self, seed: dict) -> str:
         agent_id = self._next_id()
         agent_name = f"agent-{agent_id:03d}-{seed['name']}"
@@ -692,14 +934,26 @@ class AgentSpawner:
         os.makedirs(os.path.join(agent_dir, "scripts"), exist_ok=True)
         with open(os.path.join(agent_dir, "strategy.md"), "w") as f:
             f.write(seed["strategy"])
+        for script_name, script_content in seed.get("scripts", {}).items():
+            with open(os.path.join(agent_dir, "scripts", script_name), "w") as f:
+                f.write(script_content)
         with open(os.path.join(agent_dir, "notes.md"), "w") as f:
             f.write(f"# Notes for {agent_name}\n\nSpawned from seed: {seed['name']}\n")
+        init_memory(
+            agent_dir,
+            agent_name,
+            origin=f"seed:{seed['name']}",
+            change=f"Initialized from seed strategy `{seed['name']}`.",
+            why="Starting baseline strategy for this agent family.",
+            version="v1.0",
+        )
         with open(os.path.join(agent_dir, "results.tsv"), "w") as f:
             f.write("iteration\tstrategy_version\twin_rate\tdelta\trounds_played\tstatus\tdescription\n")
+        self._write_initial_status(agent_dir, agent_name)
         logger.info(f"Spawned agent {agent_name} from seed {seed['name']}")
         return agent_name
 
-    def clone_agent(self, source_name: str, mutation_note: str) -> str:
+    def clone_agent(self, source_name: str, mutation_note: str, agent_config: dict | None = None) -> str:
         source_dir = os.path.join(self.agents_dir, source_name)
         agent_id = self._next_id()
         clone_name = f"agent-{agent_id:03d}-clone-{source_name.split('-', 2)[-1]}"
@@ -710,6 +964,9 @@ class AgentSpawner:
         clone_config_path = os.path.join(clone_dir, "agent_config.json")
         if os.path.exists(clone_config_path):
             os.unlink(clone_config_path)
+        if agent_config:
+            with open(clone_config_path, "w") as f:
+                json.dump(agent_config, f, indent=2)
         pred_path = os.path.join(clone_dir, "predictions.jsonl")
         if os.path.exists(pred_path):
             os.unlink(pred_path)
@@ -719,6 +976,20 @@ class AgentSpawner:
         notes_path = os.path.join(clone_dir, "notes.md")
         with open(notes_path, "a") as f:
             f.write(f"\n## Coordinator Mutation\nCloned from {source_name}.\nMutation instruction: {mutation_note}\n")
+            if agent_config and agent_config.get("model"):
+                f.write(f"Model override: {agent_config['model']}\n")
+        init_memory(
+            clone_dir,
+            clone_name,
+            origin=f"clone:{source_name}",
+            change=f"Inherited strategy from `{source_name}`.",
+            why=f"Spawned as a new branch to test this mutation: {mutation_note}",
+            version="v1.0",
+        )
+        extra = {"source_agent": source_name}
+        if agent_config:
+            extra.update(agent_config)
+        self._write_initial_status(clone_dir, clone_name, extra=extra)
         logger.info(f"Cloned {source_name} -> {clone_name} with mutation: {mutation_note}")
         return clone_name
 
@@ -756,7 +1027,16 @@ class AgentSpawner:
             f.write(f"This agent runs the SAME strategy as {source_name} but INVERTS the final signal.\n")
             f.write(f"If {source_name} says Up, this agent says Down (and vice versa).\n\n")
             f.write(f"Hypothesis: If the source agent is consistently wrong, the mirror should be consistently right.\n")
+        init_memory(
+            mirror_dir,
+            mirror_name,
+            origin=f"mirror:{source_name}",
+            change=f"Initialized as a mirror of `{source_name}`.",
+            why="Test whether inverting the parent signal improves accuracy.",
+            version="v1.0",
+        )
 
+        self._write_initial_status(mirror_dir, mirror_name, extra={"source_agent": source_name, "mirror": True})
         logger.info(f"Spawned mirror {mirror_name} (inverting {source_name})")
         return mirror_name
 
@@ -774,4 +1054,14 @@ class AgentSpawner:
         dest = os.path.join(graveyard_dir, agent_name)
         os.makedirs(graveyard_dir, exist_ok=True)
         shutil.move(agent_dir, dest)
+        status_path = os.path.join(dest, "status.json")
+        if os.path.exists(status_path):
+            try:
+                with open(status_path) as f:
+                    status = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                status = {"agent_id": agent_name, "archetype": self._infer_archetype(agent_name)}
+            status["status"] = "retired"
+            status["last_action"] = "retire"
+            atomic_write_json(status_path, status)
         logger.info(f"Retired agent {agent_name} to graveyard")

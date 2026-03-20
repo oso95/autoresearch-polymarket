@@ -26,7 +26,13 @@ def test_freeze_snapshot(data_dir):
     timestamp = 1710000000
     rm.freeze_snapshot(timestamp)
     snapshot_path = os.path.join(data_dir, "rounds", str(timestamp), "snapshot.json")
+    current_round_path = os.path.join(data_dir, "live", "current-round.json")
+    predictions_dir = os.path.join(data_dir, "rounds", str(timestamp), "predictions")
+    prediction_updates_dir = os.path.join(data_dir, "rounds", str(timestamp), "prediction-updates")
     assert os.path.exists(snapshot_path)
+    assert os.path.exists(current_round_path)
+    assert os.path.isdir(predictions_dir)
+    assert os.path.isdir(prediction_updates_dir)
     snapshot = json.loads(open(snapshot_path).read())
     assert "chainlink_btc_price" in snapshot
     assert "binance_candles_5m" in snapshot

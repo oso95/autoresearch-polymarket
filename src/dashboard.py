@@ -5,6 +5,8 @@ import os
 import sys
 import time
 
+from src.codex_cli import DEFAULT_PREDICTION_MODEL, normalize_model_name
+
 CREATIVE_KEYWORDS = {"yi-jing", "fibonacci", "crowd-psychology", "tarot", "gematria", "astro"}
 
 def _agent_type(agent_dir: str, name: str) -> str:
@@ -23,8 +25,9 @@ def _agent_type(agent_dir: str, name: str) -> str:
         return "ENSEMBLE"
     if any(kw in name for kw in CREATIVE_KEYWORDS):
         return "CREATIVE"
-    if agent_config.get("model") and agent_config["model"] != "haiku":
-        return f"M:{agent_config['model'][:3]}"
+    model = normalize_model_name(agent_config.get("model"), DEFAULT_PREDICTION_MODEL)
+    if model != DEFAULT_PREDICTION_MODEL:
+        return f"M:{model[:3]}"
     if "clone" in name:
         return "CLONE"
     return "SEED"

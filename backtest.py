@@ -13,7 +13,7 @@ Usage:
   python3 backtest.py --split 0.7
 
   # Use a specific model for all agents (override per-agent config)
-  python3 backtest.py --model sonnet
+  python3 backtest.py --model gpt-5.4
 
   # Higher concurrency for faster runs
   python3 backtest.py --concurrency 15 --agent-concurrency 5
@@ -26,6 +26,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
 
+from src.codex_cli import DEFAULT_PREDICTION_MODEL
 from src.runner.backtester import Backtester, load_historical_rounds, split_train_test, walk_forward_splits
 from src.runner.agent_runner import AgentRunner
 
@@ -45,7 +46,7 @@ async def main():
     parser.add_argument("--walk-forward", action="store_true",
                         help="Use walk-forward validation (multiple rolling train/test splits)")
     parser.add_argument("--model", default=None,
-                        help="Override model for all agents (haiku, sonnet, opus)")
+                        help=f"Override model for all agents (default {DEFAULT_PREDICTION_MODEL})")
     parser.add_argument("--concurrency", type=int, default=10,
                         help="Max concurrent predictions per agent (default: 10)")
     parser.add_argument("--agent-concurrency", type=int, default=3,
@@ -53,7 +54,7 @@ async def main():
     parser.add_argument("--timeout", type=int, default=90,
                         help="Prediction timeout in seconds (default: 90)")
     parser.add_argument("--batch-size", type=int, default=10,
-                        help="Rounds per Claude call in batch mode (default: 10, use 1 for single mode)")
+                        help="Rounds per Codex/GPT call in batch mode (default: 10, use 1 for single mode)")
     parser.add_argument("--output", default=None,
                         help="Output JSON file path (default: live-run/data/backtest-results.json)")
     args = parser.parse_args()
@@ -88,7 +89,7 @@ async def main():
     bt = Backtester(
         agents_dir=agents_dir,
         data_dir=data_dir,
-        model=args.model or "haiku",
+        model=args.model or DEFAULT_PREDICTION_MODEL,
         timeout=args.timeout,
         concurrency=args.concurrency,
         batch_size=args.batch_size,

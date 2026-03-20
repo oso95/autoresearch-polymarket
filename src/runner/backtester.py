@@ -19,6 +19,7 @@ import math
 import os
 import time
 
+from src.codex_cli import DEFAULT_PREDICTION_MODEL, normalize_model_name
 from src.runner.predictor import Predictor, parse_prediction_response
 from src.io_utils import read_jsonl
 
@@ -118,7 +119,7 @@ class Backtester:
         self,
         agents_dir: str,
         data_dir: str,
-        model: str = "haiku",
+        model: str = DEFAULT_PREDICTION_MODEL,
         timeout: int = 90,
         concurrency: int = 10,
         batch_size: int = 10,
@@ -137,7 +138,7 @@ class Backtester:
     ) -> dict:
         """Run a single agent through historical rounds using batch prediction.
 
-        batch_size: number of rounds per Claude call. Higher = faster but less accurate
+        batch_size: number of rounds per Codex/GPT call. Higher = faster but less accurate
         (the model has to process more data per call). 10 is a good balance.
         Set to 1 for single-round mode (slower but matches live behavior exactly).
         """
@@ -165,11 +166,11 @@ class Backtester:
                     with open(fpath) as f:
                         scripts[fname] = f.read()
 
-        model = agent_config.get("model")
+        model = normalize_model_name(agent_config.get("model"), self.predictor.model)
         predictions = []
 
         if batch_size > 1:
-            # BATCH MODE: send multiple snapshots per Claude call (much faster)
+            # BATCH MODE: send multiple snapshots per Codex/GPT call (much faster)
             batches = [rounds[i:i+batch_size] for i in range(0, len(rounds), batch_size)]
             sem = asyncio.Semaphore(self.concurrency)
 
@@ -213,7 +214,7 @@ class Backtester:
                         "reasoning": result.get("reasoning", "")[:100],
                     })
         else:
-            # SINGLE MODE: one Claude call per round (slower, matches live exactly)
+            # SINGLE MODE: one Codex/GPT call per round (slower, matches live exactly)
             sem = asyncio.Semaphore(self.concurrency)
 
             async def _predict_single(round_data: dict):
@@ -265,7 +266,7 @@ class Backtester:
             "confidence_interval": (ci_low, ci_high),
             "predictions": predictions,
             "mirror": agent_config.get("mirror", False),
-            "model": agent_config.get("model", "haiku"),
+            "model": normalize_model_name(agent_config.get("model"), self.predictor.model),
         }
 
     async def backtest_all(
@@ -319,7 +320,7 @@ class Backtester:
                 "ci_low": r["confidence_interval"][0],
                 "ci_high": r["confidence_interval"][1],
                 "mirror": r.get("mirror", False),
-                "model": r.get("model", "haiku"),
+                "model": r.get("model", DEFAULT_PREDICTION_MODEL),
             })
 
         summary["agents"].sort(key=lambda x: x["win_rate"], reverse=True)
@@ -344,7 +345,7 @@ class Backtester:
         for r in valid:
             ci = f"[{r['confidence_interval'][0]:.0%},{r['confidence_interval'][1]:.0%}]"
             mirror = "YES" if r.get("mirror") else ""
-            model = r.get("model", "haiku")
+            model = r.get("model", DEFAULT_PREDICTION_MODEL)
             print(
                 f"{r['agent']:<50} {r['win_rate']:>5.1%} "
                 f"{r['wins']:>3}/{r['total']:<3} "

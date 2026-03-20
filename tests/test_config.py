@@ -19,4 +19,6 @@ def test_load_config_defaults():
     assert config.kill_threshold_win_rate == 0.45
     assert config.kill_min_rounds == 50
     assert config.prediction_deadline_seconds == 90
+    assert config.intraround_update_interval_seconds == 5
+    assert config.prediction_lock_seconds == 5
     assert config.initial_screening_rounds == 15

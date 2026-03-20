@@ -1,4 +1,5 @@
 # tests/test_polymarket_ws.py
+import asyncio
 import pytest
 from src.data_layer.polymarket_ws import (
     parse_book_event,
@@ -6,6 +7,8 @@ from src.data_layer.polymarket_ws import (
     parse_market_resolved_event,
     parse_rtds_price,
     build_market_subscription,
+    build_market_subscription_update,
+    PolymarketMarketWS,
 )
 
 def test_parse_book_event():
@@ -56,7 +59,26 @@ def test_parse_rtds_price():
     assert price["timestamp"] == 1710000000000
 
 def test_build_market_subscription():
-    sub = build_market_subscription(["token_up", "token_down"])
+    sub = build_market_subscription(["token_up", "token_down", "token_up"])
     assert sub["type"] == "market"
     assert sub["assets_ids"] == ["token_up", "token_down"]
     assert sub["custom_feature_enabled"] is True
+
+
+def test_build_market_subscription_update():
+    sub = build_market_subscription_update(["token_up", "token_down", "token_up"])
+    assert sub["operation"] == "subscribe"
+    assert sub["assets_ids"] == ["token_up", "token_down"]
+
+
+def test_market_ws_empty_message_is_ignored():
+    sent = []
+
+    class DummyWS:
+        async def send(self, payload):
+            sent.append(payload)
+
+    ws = PolymarketMarketWS()
+    ws._ws = DummyWS()
+    asyncio.run(ws._dispatch({}))
+    assert sent == []

@@ -19,6 +19,7 @@ import json
 import os
 import logging
 from src.io_utils import read_jsonl
+from src.memory_utils import init_memory
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +139,14 @@ def create_ensemble_agent(
         f.write(f"# Ensemble: {ensemble_name}\n\n")
         f.write(f"Combines {len(member_agents)} agents via {weighting} weighted voting.\n")
         f.write(f"Members: {', '.join(member_agents)}\n")
+    init_memory(
+        agent_dir,
+        agent_name,
+        origin="ensemble",
+        change=f"Initialized ensemble `{ensemble_name}` with {len(member_agents)} members.",
+        why=f"Combine agents through {weighting} weighted voting.",
+        version="v1.0",
+    )
 
     # Results TSV
     with open(os.path.join(agent_dir, "results.tsv"), "w") as f:

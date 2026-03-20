@@ -4,7 +4,7 @@ Fast Evolution Loop — accelerate strategy discovery using backtesting.
 
 Instead of waiting 5 minutes per round in live trading, this loop:
 1. Backtests agent on TRAIN set → baseline win rate
-2. Evolves strategy via Claude (sonnet)
+2. Evolves strategy via Codex/GPT
 3. Backtests evolved strategy on TRAIN set → new win rate
 4. Validates on TEST set → check for overfitting
 5. Keep if better + not overfit, revert if worse
@@ -35,6 +35,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(__file__))
 
+from src.codex_cli import DEFAULT_PREDICTION_MODEL
 from src.runner.backtester import Backtester, load_historical_rounds, split_train_test
 from src.runner.evolver import StrategyEvolver
 from src.runner.agent_runner import AgentRunner
@@ -105,7 +106,7 @@ async def fast_evolve_agent(
         history.append(baseline)
 
         # Step 3: Evolve strategy
-        logger.info(f"  Step 3: Evolving strategy via Claude...")
+        logger.info(f"  Step 3: Evolving strategy via Codex/GPT...")
         evo_result = await evolver.evolve_agent(agent_name)
         if not evo_result:
             logger.warning(f"  Evolution failed, keeping current strategy")
@@ -181,8 +182,10 @@ async def main():
     parser.add_argument("--split", type=float, default=0.7, help="Train/test split ratio")
     parser.add_argument("--concurrency", type=int, default=8, help="Prediction concurrency")
     parser.add_argument("--agent-concurrency", type=int, default=2,
-                        help="Agents evolving in parallel (default: 2, uses sonnet)")
-    parser.add_argument("--model", default="haiku", help="Prediction model (default: haiku)")
+                        help="Agents evolving in parallel (default: 2)")
+    parser.add_argument("--model", default=DEFAULT_PREDICTION_MODEL, help=f"Prediction model (default: {DEFAULT_PREDICTION_MODEL})")
+    parser.add_argument("--evolution-timeout", type=int, default=900,
+                        help="Seconds to allow each evolution call before timing out")
     parser.add_argument("--dry-run", action="store_true", help="Only backtest, no evolution")
     args = parser.parse_args()
 
@@ -222,7 +225,7 @@ async def main():
         bt.print_results(results, label="Full backtest (dry run)")
         return
 
-    evolver = StrategyEvolver(agents_dir, data_dir, timeout_seconds=180)
+    evolver = StrategyEvolver(agents_dir, data_dir, timeout_seconds=args.evolution_timeout)
 
     # Run fast evolution for each agent
     sem = asyncio.Semaphore(args.agent_concurrency)

@@ -19,9 +19,9 @@ def test_streak_adjusted_floor():
 
 def test_build_leaderboard():
     agents = {
-        "agent-001": {"win_rate": 0.65, "total_rounds": 100, "losing_streak": 0},
-        "agent-002": {"win_rate": 0.45, "total_rounds": 60, "losing_streak": 5},
-        "agent-003": {"win_rate": 0.55, "total_rounds": 30, "losing_streak": 1},
+        "agent-001": {"win_rate": 0.65, "all_time_win_rate": 0.65, "ew_win_rate": 0.70, "total_rounds": 100, "losing_streak": 0},
+        "agent-002": {"win_rate": 0.45, "all_time_win_rate": 0.45, "ew_win_rate": 0.40, "total_rounds": 60, "losing_streak": 5},
+        "agent-003": {"win_rate": 0.55, "all_time_win_rate": 0.55, "ew_win_rate": 0.50, "total_rounds": 30, "losing_streak": 1},
     }
     board = build_leaderboard(agents)
     assert board[0].agent_name == "agent-001"

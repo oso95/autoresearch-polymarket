@@ -5,6 +5,7 @@ import time
 import logging
 from dataclasses import asdict
 
+from src.codex_cli import DEFAULT_PREDICTION_MODEL, normalize_model_name
 from src.config import Config
 from src.coordinator.leaderboard import build_leaderboard
 from src.coordinator.spawner import AgentSpawner, SEED_STRATEGIES
@@ -14,6 +15,7 @@ from src.io_utils import atomic_write_json, atomic_append_jsonl
 logger = logging.getLogger(__name__)
 
 INITIAL_SCREENING_KILL_RATE = 0.30
+MODEL_EXPERIMENT_MODELS = ()
 
 class Tournament:
     def __init__(self, config: Config, spawner: AgentSpawner, runner: AgentRunner, data_dir: str):
@@ -23,11 +25,40 @@ class Tournament:
         self.data_dir = data_dir
         self._graveyard_dir = os.path.join(data_dir, "coordinator", "graveyard")
 
+    def _load_agent_status(self, agent_name: str) -> dict:
+        return self.runner._write_status(agent_name)
+
+    def _infer_agent_stats(self, agent_name: str) -> dict:
+        status = self._load_agent_status(agent_name)
+        streak = self.runner.get_losing_streak(agent_name)
+        return {
+            "win_rate": status.get("all_time_win_rate", 0.0),
+            "all_time_win_rate": status.get("all_time_win_rate", 0.0),
+            "ew_win_rate": status.get("ew_win_rate", status.get("all_time_win_rate", 0.0)),
+            "total_rounds": status.get("total_rounds", 0),
+            "losing_streak": streak,
+            "model": normalize_model_name(status.get("model"), DEFAULT_PREDICTION_MODEL),
+            "status": status.get("status", "active"),
+            "current_experiment": status.get("current_experiment"),
+        }
+
+    def _model_variant_exists(self, source_agent: str, model: str, alive: list[str]) -> bool:
+        for name in alive:
+            status = self._load_agent_status(name)
+            if status.get("source_agent") == source_agent and normalize_model_name(status.get("model"), DEFAULT_PREDICTION_MODEL) == model:
+                return True
+            if name == source_agent and normalize_model_name(status.get("model"), DEFAULT_PREDICTION_MODEL) == model:
+                return True
+        return False
+
     def should_kill(self, agent_name: str) -> bool:
-        win_rate, total = self.runner.get_agent_win_rate(agent_name)
+        status = self._infer_agent_stats(agent_name)
+        win_rate = status["all_time_win_rate"]
+        total = status["total_rounds"]
+        score = (status["ew_win_rate"] * 0.6) + (status["all_time_win_rate"] * 0.4)
         if total > self.config.initial_screening_rounds and win_rate < INITIAL_SCREENING_KILL_RATE:
             return True
-        if total >= self.config.kill_min_rounds and win_rate < self.config.kill_threshold_win_rate:
+        if total >= self.config.kill_min_rounds and score < self.config.kill_threshold_win_rate:
             return True
         return False
 
@@ -38,9 +69,7 @@ class Tournament:
 
         agent_stats = {}
         for name in agents:
-            wr, total = self.runner.get_agent_win_rate(name)
-            streak = self.runner.get_losing_streak(name)
-            agent_stats[name] = {"win_rate": wr, "total_rounds": total, "losing_streak": streak}
+            agent_stats[name] = self._infer_agent_stats(name)
 
         board = build_leaderboard(agent_stats)
         leaderboard_path = os.path.join(self.data_dir, "coordinator", "leaderboard.json")
@@ -98,6 +127,34 @@ class Tournament:
             alive.append(clone_name)
             actions.append({"type": "clone", "source": entry.agent_name, "clone": clone_name})
             clone_count += 1
+
+        # Model experiments: run top strategies on stronger models in parallel.
+        model_variant_count = 0
+        for entry in board:
+            if len(alive) >= self.config.max_agents or model_variant_count >= 2:
+                break
+            if entry.total_rounds < 10:
+                continue
+            for candidate_model in MODEL_EXPERIMENT_MODELS:
+                if candidate_model == entry.model:
+                    continue
+                if self._model_variant_exists(entry.agent_name, candidate_model, alive):
+                    continue
+                mutation = f"Model experiment: run the same strategy on {candidate_model} for parallel comparison"
+                variant_name = self.spawner.clone_agent(
+                    entry.agent_name,
+                    mutation,
+                    agent_config={"model": candidate_model, "source_agent": entry.agent_name},
+                )
+                alive.append(variant_name)
+                actions.append({
+                    "type": "model-variant",
+                    "source": entry.agent_name,
+                    "variant": variant_name,
+                    "model": candidate_model,
+                })
+                model_variant_count += 1
+                break
 
         # Auto-mirror: if an agent is extremely anti-predictive (below 35% with 20+ rounds),
         # spawn a mirror that inverts its signal — these are the most valuable mirror candidates

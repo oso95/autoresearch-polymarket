@@ -7,6 +7,8 @@ import os
 import signal
 import time
 
+import aiohttp
+
 from src.config import Config, load_config
 from src.data_layer.collector import Collector
 from src.data_layer.retention import RetentionManager
@@ -17,10 +19,140 @@ from src.runner.health_monitor import HealthMonitor
 from src.runner.predictor import Predictor
 from src.runner.fast_fail import FastFailChecker
 from src.runner.evolver import StrategyEvolver
+from src.runner.paper_execution import build_execution_quote, build_live_execution_quote
 from src.io_utils import read_jsonl, read_jsonl_tail
+from src.memory_utils import read_memory_bundle
+from src.shared_knowledge import build_shared_knowledge_context, ensure_shared_knowledge_forum
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
+ROUND_DURATION_SECONDS = 300
+ROUND_FUTURE_TOLERANCE_SECONDS = 60
+
+
+def _round_is_tradeable(round_timestamp: int | None, prediction_lock_seconds: int, now: float | None = None) -> bool:
+    if round_timestamp is None:
+        return False
+    now = time.time() if now is None else now
+    lock_at = round_timestamp + ROUND_DURATION_SECONDS - prediction_lock_seconds
+    return now < lock_at
+
+
+def _load_live_market(data_dir: str) -> dict | None:
+    market_path = os.path.join(data_dir, "live", "polymarket_market.json")
+    if not os.path.exists(market_path):
+        return None
+    try:
+        with open(market_path) as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _round_matches_accepting_market(data_dir: str, round_timestamp: int | None) -> bool:
+    if round_timestamp is None:
+        return False
+    market = _load_live_market(data_dir)
+    if not market:
+        return False
+    market_round = market.get("round_start_ts") or market.get("window_start_ts")
+    return (
+        int(market_round or 0) == int(round_timestamp)
+        and market.get("accepting_orders") is True
+    )
+
+
+def _best_level(levels: list[dict], price_key: str, size_key: str, *, best: str) -> tuple[float | None, float | None]:
+    if not levels:
+        return None, None
+    ordered = sorted(
+        (
+            (float(level.get(price_key)), float(level.get(size_key, 0) or 0))
+            for level in levels
+            if level.get(price_key) is not None
+        ),
+        key=lambda item: item[0],
+        reverse=(best == "bid"),
+    )
+    return ordered[0] if ordered else (None, None)
+
+
+def _sum_sizes(levels: list[dict], size_key: str, limit: int = 5) -> float:
+    return sum(float(level.get(size_key, 0) or 0) for level in levels[:limit])
+
+
+def _build_live_features(snapshot: dict) -> dict:
+    features: dict[str, float | int | None] = {}
+
+    orderbook = snapshot.get("binance_orderbook") or {}
+    bids = orderbook.get("bids") or []
+    asks = orderbook.get("asks") or []
+    best_bid, best_bid_qty = _best_level(bids, "price", "qty", best="bid")
+    best_ask, best_ask_qty = _best_level(asks, "price", "qty", best="ask")
+    if best_bid is not None and best_ask is not None:
+        mid = (best_bid + best_ask) / 2
+        spread = best_ask - best_bid
+        depth_bid = _sum_sizes(bids, "qty")
+        depth_ask = _sum_sizes(asks, "qty")
+        depth_total = depth_bid + depth_ask
+        features.update({
+            "binance_best_bid": best_bid,
+            "binance_best_ask": best_ask,
+            "binance_mid_price": mid,
+            "binance_spread": spread,
+            "binance_spread_bps": (spread / mid * 10000) if mid else 0.0,
+            "binance_top_bid_qty": best_bid_qty,
+            "binance_top_ask_qty": best_ask_qty,
+            "binance_depth_bid_qty_5": depth_bid,
+            "binance_depth_ask_qty_5": depth_ask,
+            "binance_depth_imbalance_5": ((depth_bid - depth_ask) / depth_total) if depth_total else 0.0,
+        })
+
+    trades = (snapshot.get("binance_trades_recent") or {}).get("trades") or []
+    if trades:
+        recent = trades[-100:]
+        first_price = float(recent[0].get("p", 0) or 0)
+        last_price = float(recent[-1].get("p", 0) or 0)
+        buy_volume = 0.0
+        sell_volume = 0.0
+        for trade in recent:
+            qty = float(trade.get("q", 0) or 0)
+            if trade.get("m"):
+                sell_volume += qty
+            else:
+                buy_volume += qty
+        total_volume = buy_volume + sell_volume
+        features.update({
+            "recent_trade_count_100": len(recent),
+            "recent_trade_first_price": first_price,
+            "recent_trade_last_price": last_price,
+            "recent_trade_return_bps_100": (((last_price - first_price) / first_price) * 10000) if first_price else 0.0,
+            "recent_buy_volume_100": buy_volume,
+            "recent_sell_volume_100": sell_volume,
+            "recent_signed_volume_100": buy_volume - sell_volume,
+            "recent_trade_imbalance_100": ((buy_volume - sell_volume) / total_volume) if total_volume else 0.0,
+        })
+
+    poly_books = ((snapshot.get("polymarket_orderbooks") or {}).get("books") or {})
+    for outcome in ("Up", "Down"):
+        book = poly_books.get(outcome) or {}
+        bid, bid_size = _best_level(book.get("bids") or [], "price", "size", best="bid")
+        ask, ask_size = _best_level(book.get("asks") or [], "price", "size", best="ask")
+        prefix = f"polymarket_{outcome.lower()}"
+        if bid is not None:
+            features[f"{prefix}_best_bid"] = bid
+            features[f"{prefix}_best_bid_size"] = bid_size
+        if ask is not None:
+            features[f"{prefix}_best_ask"] = ask
+            features[f"{prefix}_best_ask_size"] = ask_size
+        if bid is not None and ask is not None:
+            mid = (bid + ask) / 2
+            features[f"{prefix}_mid"] = mid
+            features[f"{prefix}_spread"] = ask - bid
+    if features.get("polymarket_up_mid") is not None and features.get("polymarket_down_mid") is not None:
+        features["polymarket_mid_skew"] = features["polymarket_up_mid"] - features["polymarket_down_mid"]
+
+    return features
 
 
 def init_project(project_dir: str):
@@ -33,6 +165,7 @@ def init_project(project_dir: str):
 
     # Seed shared knowledge directory with initial guidance
     shared_dir = os.path.join(data_dir, "shared_knowledge")
+    ensure_shared_knowledge_forum(shared_dir)
     guidance_path = os.path.join(shared_dir, "approaches.md")
     if not os.path.exists(guidance_path):
         with open(guidance_path, "w") as f:
@@ -72,6 +205,39 @@ The best approach is the one that WORKS. Win rate is all that matters.
 Don't be afraid to try something unconventional — the tournament will
 keep what works and discard what doesn't.
 """)
+    forum_guide_path = os.path.join(shared_dir, "forum-guide.md")
+    if not os.path.exists(forum_guide_path):
+        with open(forum_guide_path, "w") as f:
+            f.write("""# Shared Knowledge Forum Guide
+
+Use the shared knowledge forum like a small Stack Overflow for agents.
+
+## When To Create A Post
+- You found a pattern that may help other agents
+- You validated or invalidated a threshold, rule, or signal
+- You discovered a regime-specific failure mode
+- You found a reusable script idea or data feature
+
+## Good Post Structure
+- Title: short and specific
+- Claim: what you think is true
+- Evidence: what rounds or patterns support it
+- Caveat: when it may fail
+
+## Voting
+- Upvote posts that match your own evidence
+- Downvote posts that seem contradicted by your results
+- Add a short reason when voting if possible
+
+## Comments
+- Leave short comments with confirmations, caveats, or counterexamples
+- Prefer concise evidence over long essays
+
+## Keep It High Signal
+- Do not repost the same idea repeatedly
+- Do not dump raw logs
+- Prefer specific, testable insights
+""")
     config_path = os.path.join(project_dir, "config.json")
     if not os.path.exists(config_path):
         config = Config()
@@ -87,6 +253,7 @@ async def _invoke_single_agent(
     runner: AgentRunner,
     round_timestamp: int,
     shared_knowledge_dir: str,
+    price_session: aiohttp.ClientSession | None = None,
 ):
     """Invoke a single agent for prediction. Designed to run in parallel."""
     agent_dir = os.path.join(agents_dir, agent_name)
@@ -106,34 +273,13 @@ async def _invoke_single_agent(
                 with open(fpath) as f:
                     scripts[fname] = f.read()
 
-    notes_path = os.path.join(agent_dir, "notes.md")
-    notes = ""
-    if os.path.exists(notes_path):
-        with open(notes_path) as f:
-            notes = f.read()
+    notes = read_memory_bundle(agent_dir)
 
     # Add shared knowledge (core files + last 10 discoveries to save tokens)
     if os.path.isdir(shared_knowledge_dir):
-        shared_files = []
-        core_files = []
-        discovery_files = []
-        for fname in sorted(os.listdir(shared_knowledge_dir)):
-            fpath = os.path.join(shared_knowledge_dir, fname)
-            if os.path.isfile(fpath) and fname.endswith((".md", ".txt", ".json")):
-                if fname.startswith("discovery-"):
-                    discovery_files.append((fname, fpath))
-                else:
-                    core_files.append((fname, fpath))
-        # Always include core files (approaches.md, tournament-insights.md)
-        for fname, fpath in core_files:
-            with open(fpath) as f:
-                shared_files.append(f"### Shared: {fname}\n{f.read()}")
-        # Only include last 10 discoveries (most recent)
-        for fname, fpath in discovery_files[-10:]:
-            with open(fpath) as f:
-                shared_files.append(f"### Shared: {fname}\n{f.read()}")
-        if shared_files:
-            notes += "\n\n## Shared Knowledge Base\n" + "\n\n".join(shared_files)
+        shared_context = build_shared_knowledge_context(shared_knowledge_dir, agent_name)
+        if shared_context.strip():
+            notes += "\n\n" + shared_context
 
     # Recent results summary (use tail read for efficiency — only need last 20)
     preds = read_jsonl_tail(os.path.join(agent_dir, "predictions.jsonl"), 20)
@@ -169,10 +315,15 @@ async def _invoke_single_agent(
         result["reasoning"] = f"[MIRROR of {original}] {result['reasoning']}"
 
     strategy_version = str(hash(strategy))[:8]
+    execution_quote = await build_live_execution_quote(snapshot, result["prediction"], session=price_session)
+    if execution_quote is None:
+        execution_quote = build_execution_quote(snapshot, result["prediction"])
+
     runner.record_prediction(
         agent_name, round_timestamp,
         result["prediction"], result["confidence"],
         result["reasoning"], strategy_version,
+        execution_quote=execution_quote,
     )
     logger.info(f"  {agent_name}: {result['prediction']} (confidence {result['confidence']:.0%}) — {result['reasoning'][:80]}")
 
@@ -186,15 +337,42 @@ async def _run_round(
     fast_fail: FastFailChecker,
     config: Config,
 ):
-    """Invoke ALL agents in PARALLEL for a single round."""
-    snapshot_path = os.path.join(data_dir, "rounds", str(round_timestamp), "snapshot.json")
-    if not os.path.exists(snapshot_path):
-        logger.warning(f"No snapshot for round {round_timestamp}, skipping")
+    """Invoke ALL agents in PARALLEL for the current state of a round."""
+    snapshot = _build_live_round_snapshot(data_dir, round_timestamp)
+    if snapshot is None:
+        logger.warning(f"No live snapshot available for round {round_timestamp}, skipping")
         return
 
-    with open(snapshot_path) as f:
-        snapshot = json.load(f)
+    _trim_prediction_snapshot(snapshot)
+    open_snapshot = snapshot.get("round_open_snapshot")
+    if isinstance(open_snapshot, dict):
+        _trim_prediction_snapshot(open_snapshot)
 
+    agents = runner.discover_agents()
+    shared_knowledge_dir = os.path.join(data_dir, "shared_knowledge")
+    age_seconds = snapshot.get("round_context", {}).get("age_seconds")
+    logger.info(
+        f"Round {round_timestamp}: updating {len(agents)} agents "
+        f"(age={age_seconds}s, max 8 concurrent)"
+    )
+
+    # Use semaphore to limit concurrent Codex/GPT calls.
+    sem = asyncio.Semaphore(8)  # Increased for larger agent pool (38+ agents)
+
+    async with aiohttp.ClientSession() as price_session:
+        async def _limited_invoke(agent_name):
+            async with sem:
+                return await _invoke_single_agent(
+                    agent_name, agents_dir, snapshot, predictor,
+                    runner, round_timestamp, shared_knowledge_dir,
+                    price_session=price_session,
+                )
+
+        tasks = [_limited_invoke(name) for name in agents]
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def _trim_prediction_snapshot(snapshot: dict) -> None:
     # Trim snapshot to reduce token usage — agents don't need 100 candles
     if "binance_candles_5m" in snapshot:
         candles = snapshot["binance_candles_5m"].get("candles", [])
@@ -209,22 +387,58 @@ async def _run_round(
             if isinstance(val, dict) and "data" in val:
                 val["data"] = val["data"][-5:]
 
-    agents = runner.discover_agents()
-    shared_knowledge_dir = os.path.join(data_dir, "shared_knowledge")
-    logger.info(f"Round {round_timestamp}: invoking {len(agents)} agents (max 8 concurrent)")
+def _build_live_round_snapshot(data_dir: str, round_timestamp: int) -> dict | None:
+    round_snapshot_path = os.path.join(data_dir, "rounds", str(round_timestamp), "snapshot.json")
+    if not os.path.exists(round_snapshot_path):
+        return None
 
-    # Use semaphore to limit concurrent Claude CLI calls (avoid rate limits)
-    sem = asyncio.Semaphore(8)  # Increased for larger agent pool (38+ agents)
+    with open(round_snapshot_path) as f:
+        round_open_snapshot = json.load(f)
 
-    async def _limited_invoke(agent_name):
-        async with sem:
-            return await _invoke_single_agent(
-                agent_name, agents_dir, snapshot, predictor,
-                runner, round_timestamp, shared_knowledge_dir,
-            )
+    snapshot = {}
+    live_dir = os.path.join(data_dir, "live")
+    for fname in os.listdir(live_dir):
+        if fname.endswith(".json") and fname not in {"status.json", "heartbeat.json"}:
+            key = fname.replace(".json", "")
+            with open(os.path.join(live_dir, fname)) as f:
+                snapshot[key] = json.load(f)
 
-    tasks = [_limited_invoke(name) for name in agents]
-    await asyncio.gather(*tasks, return_exceptions=True)
+    polling = {}
+    polling_dir = os.path.join(data_dir, "polling")
+    if os.path.isdir(polling_dir):
+        for fname in os.listdir(polling_dir):
+            if fname.endswith(".json"):
+                key = fname.replace(".json", "")
+                with open(os.path.join(polling_dir, fname)) as f:
+                    polling[key] = json.load(f)
+
+    now = time.time()
+    snapshot["polling"] = polling
+    snapshot["round_timestamp"] = round_timestamp
+    snapshot["round_open_snapshot"] = round_open_snapshot
+    snapshot["live_features"] = _build_live_features(snapshot)
+    snapshot["round_context"] = {
+        "round_timestamp": round_timestamp,
+        "age_seconds": max(0, int(now - round_timestamp)),
+        "seconds_remaining": max(0, int((round_timestamp + ROUND_DURATION_SECONDS) - now)),
+        "opened_at": round_open_snapshot.get("frozen_at"),
+        "snapshot_path": round_snapshot_path,
+    }
+    snapshot["frozen_at"] = round_open_snapshot.get("frozen_at")
+    return snapshot
+
+
+def _get_current_round_timestamp(data_dir: str) -> int | None:
+    current_round_path = os.path.join(data_dir, "live", "current-round.json")
+    if not os.path.exists(current_round_path):
+        return None
+    try:
+        with open(current_round_path) as f:
+            current = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+    round_timestamp = current.get("round_timestamp")
+    return int(round_timestamp) if isinstance(round_timestamp, (int, float)) else None
 
 
 def _determine_outcome_from_candles(data_dir: str, round_timestamp: int) -> str | None:
@@ -348,6 +562,13 @@ async def _evolve_single_agent(evolver: StrategyEvolver, agent_name: str, agents
     if len(scored) < 3:
         return
 
+    finalized = evolver.finalize_pending_experiment(agent_name)
+    if finalized and finalized.get("status") == "pending":
+        logger.info(f"  {agent_name}: pending experiment still gathering rounds ({finalized.get('rounds', 0)}/{evolver.evaluation_window})")
+        return
+    if finalized and finalized.get("status") in {"keep", "discard"}:
+        logger.info(f"  {agent_name}: finalized experiment -> {finalized['status']} ({finalized.get('win_rate', 0):.1%})")
+
     logger.info(f"  Evolving {agent_name}...")
     result = await evolver.evolve_agent(agent_name)
     if result:
@@ -361,7 +582,7 @@ async def _evolve_single_agent(evolver: StrategyEvolver, agent_name: str, agents
 async def _evolve_agents(evolver: StrategyEvolver, runner: AgentRunner, fast_fail: FastFailChecker, agents_dir: str):
     """Run the autoresearch inner loop: evolve agents (2 concurrent to save time)."""
     agents = runner.discover_agents()
-    sem = asyncio.Semaphore(3)  # 3 concurrent evolutions (sonnet, parallelized more)
+    sem = asyncio.Semaphore(3)  # 3 concurrent Codex/GPT evolutions
 
     async def _limited(name):
         async with sem:
@@ -369,6 +590,55 @@ async def _evolve_agents(evolver: StrategyEvolver, runner: AgentRunner, fast_fai
 
     tasks = [_limited(name) for name in agents]
     await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _monitor_round_until_lock(
+    round_timestamp: int,
+    data_dir: str,
+    agents_dir: str,
+    runner: AgentRunner,
+    predictor: Predictor,
+    fast_fail: FastFailChecker,
+    config: Config,
+    monitor: HealthMonitor,
+    stop_event: asyncio.Event,
+):
+    interval = max(5, config.intraround_update_interval_seconds)
+    cycle = 0
+
+    logger.info(
+        f"Round {round_timestamp}: continuous monitoring started "
+        f"(interval={interval}s, lock={config.prediction_lock_seconds}s before close)"
+    )
+
+    while not stop_event.is_set():
+        now = time.time()
+        market_accepting = _round_matches_accepting_market(data_dir, round_timestamp)
+        lock_at = round_timestamp + ROUND_DURATION_SECONDS - config.prediction_lock_seconds
+        if not market_accepting and now >= lock_at:
+            break
+        remaining_to_lock = max(0.0, lock_at - now)
+        cycle_interval = 1 if remaining_to_lock <= 15 else interval
+
+        if not monitor.is_data_layer_healthy():
+            logger.warning(f"Data layer unhealthy during round {round_timestamp}, skipping update cycle")
+        else:
+            cycle += 1
+            logger.info(f"Round {round_timestamp}: prediction cycle {cycle}")
+            await _run_round(
+                round_timestamp, data_dir, agents_dir,
+                runner, predictor, fast_fail, config,
+            )
+
+        if _round_matches_accepting_market(data_dir, round_timestamp):
+            remaining = cycle_interval
+        else:
+            remaining = lock_at - time.time()
+        if remaining <= 0:
+            break
+        await asyncio.sleep(min(cycle_interval, remaining))
+
+    logger.info(f"Round {round_timestamp}: prediction lock reached, waiting for resolution")
 
 
 async def _orchestration_loop(
@@ -390,6 +660,7 @@ async def _orchestration_loop(
     last_tournament_round_count = 0
     rounds_since_cleanup = 0
     evolution_task: asyncio.Task | None = None
+    active_round_tasks: dict[int, asyncio.Task] = {}
 
     logger.info("Orchestration loop started, waiting for data layer...")
 
@@ -404,21 +675,23 @@ async def _orchestration_loop(
     while not stop_event.is_set():
         try:
             # Check for new market (new round)
-            market_path = os.path.join(data_dir, "live", "polymarket_market.json")
-            if os.path.exists(market_path):
-                with open(market_path) as f:
-                    market = json.load(f)
+            market = _load_live_market(data_dir)
+            if market:
                 updated_at = market.get("updated_at", 0)
 
                 # Detect rounds and score/invoke
                 rounds_dir = os.path.join(data_dir, "rounds")
                 if os.path.isdir(rounds_dir):
+                    now = time.time()
                     all_rounds = sorted(
-                        [int(d) for d in os.listdir(rounds_dir) if d.isdigit()]
+                        [
+                            int(d)
+                            for d in os.listdir(rounds_dir)
+                            if d.isdigit() and int(d) <= now + ROUND_FUTURE_TOLERANCE_SECONDS
+                        ]
                     )
 
                     # Score ALL rounds that are old enough and haven't been scored
-                    now = time.time()
                     scored_count = 0
                     for round_ts in all_rounds:
                         age = now - round_ts
@@ -430,17 +703,36 @@ async def _orchestration_loop(
                             scored_count += 1
                             rounds_since_cleanup += 1
 
-                    # Invoke agents for the latest round (if new)
-                    if all_rounds:
-                        latest_round = all_rounds[-1]
+                    # Invoke agents for the current round from the data layer pointer.
+                    current_round = _get_current_round_timestamp(data_dir)
+                    if not (
+                        _round_matches_accepting_market(data_dir, current_round)
+                        or _round_is_tradeable(current_round, config.prediction_lock_seconds, now)
+                    ):
+                        current_round = None
+                    latest_round = current_round if current_round is not None else (all_rounds[-1] if all_rounds else None)
+                    if latest_round is not None and not (
+                        _round_matches_accepting_market(data_dir, latest_round)
+                        or _round_is_tradeable(latest_round, config.prediction_lock_seconds, now)
+                    ):
+                        latest_round = None
+                    if latest_round is not None:
                         if latest_round != last_round:
                             last_round = latest_round
+                        for round_ts, task in list(active_round_tasks.items()):
+                            if task.done():
+                                active_round_tasks.pop(round_ts, None)
+
+                        if latest_round not in active_round_tasks:
                             if not monitor.is_data_layer_healthy():
                                 logger.warning(f"Data layer unhealthy, skipping round {latest_round}")
                             else:
-                                await _run_round(
-                                    latest_round, data_dir, agents_dir,
-                                    runner, predictor, fast_fail, config,
+                                active_round_tasks[latest_round] = asyncio.create_task(
+                                    _monitor_round_until_lock(
+                                        latest_round, data_dir, agents_dir,
+                                        runner, predictor, fast_fail, config,
+                                        monitor, stop_event,
+                                    )
                                 )
 
             # Run strategy evolution every K scored rounds (non-blocking background task)
@@ -483,12 +775,22 @@ async def run_system(project_dir: str):
 
     collector = Collector(data_dir)
     spawner = AgentSpawner(agents_dir)
-    runner = AgentRunner(agents_dir, data_dir, config.prediction_deadline_seconds)
+    runner = AgentRunner(
+        agents_dir,
+        data_dir,
+        config.prediction_deadline_seconds,
+        config.evaluation_window_rounds,
+    )
     monitor = HealthMonitor(data_dir)
     tournament = Tournament(config, spawner, runner, data_dir)
     predictor = Predictor(timeout_seconds=config.prediction_deadline_seconds)
     fast_fail = FastFailChecker(streak_threshold=config.fast_fail_streak)
-    evolver = StrategyEvolver(agents_dir, data_dir, timeout_seconds=120)
+    evolver = StrategyEvolver(
+        agents_dir,
+        data_dir,
+        timeout_seconds=config.evolution_timeout_seconds,
+        evaluation_window=config.evaluation_window_rounds,
+    )
     retention = RetentionManager(data_dir)
 
     if not runner.discover_agents():

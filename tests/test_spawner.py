@@ -17,6 +17,9 @@ def test_spawn_from_seed(tmp_path):
     assert os.path.isdir(agent_dir)
     assert os.path.exists(os.path.join(agent_dir, "strategy.md"))
     assert os.path.exists(os.path.join(agent_dir, "notes.md"))
+    assert os.path.exists(os.path.join(agent_dir, "memory.md"))
+    assert os.path.exists(os.path.join(agent_dir, "status.json"))
+    assert os.path.exists(os.path.join(agent_dir, "scripts", "predict.py"))
     assert os.path.isdir(os.path.join(agent_dir, "scripts"))
     with open(os.path.join(agent_dir, "strategy.md")) as f:
         assert len(f.read()) > 50
@@ -34,6 +37,10 @@ def test_clone_agent(tmp_path):
     assert os.path.exists(os.path.join(clone_dir, "scripts", "test.py"))
     with open(os.path.join(clone_dir, "notes.md")) as f:
         assert "reversing the signal" in f.read()
+    with open(os.path.join(clone_dir, "memory.md")) as f:
+        memory = f.read()
+    assert "v1.0" in memory
+    assert source_name in memory
 
 def test_spawn_increments_id(tmp_path):
     spawner = AgentSpawner(str(tmp_path))

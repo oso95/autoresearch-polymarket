@@ -52,3 +52,21 @@ def test_initial_screening_kill(setup):
         correct = i == 0
         atomic_append_jsonl(pred_path, {"round": i, "agent": name, "prediction": "Up", "outcome": "Up" if correct else "Down", "correct": correct, "confidence": 0.5, "reasoning": "test", "strategy_version": "v1"})
     assert tournament.should_kill(name) is True
+
+def test_tournament_skips_model_variants_under_single_model_policy(setup):
+    tournament, spawner, runner, agents_dir, data_dir = setup
+    top = spawner.spawn_from_seed(SEED_STRATEGIES[0])
+    other = spawner.spawn_from_seed(SEED_STRATEGIES[1])
+    for i in range(12):
+        atomic_append_jsonl(
+            os.path.join(agents_dir, top, "predictions.jsonl"),
+            {"round": i, "agent": top, "prediction": "Up", "outcome": "Up", "correct": True, "confidence": 0.5, "reasoning": "test", "strategy_version": "v1"}
+        )
+        atomic_append_jsonl(
+            os.path.join(agents_dir, other, "predictions.jsonl"),
+            {"round": i, "agent": other, "prediction": "Up", "outcome": "Down", "correct": i % 2 == 0, "confidence": 0.5, "reasoning": "test", "strategy_version": "v1"}
+        )
+    runner.refresh_shared_ledger()
+    result = tournament.run_cycle()
+    variants = [a for a in result["actions"] if a["type"] == "model-variant"]
+    assert variants == []

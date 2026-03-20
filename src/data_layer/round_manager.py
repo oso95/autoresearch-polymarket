@@ -16,6 +16,8 @@ class RoundManager:
     def freeze_snapshot(self, timestamp: int) -> str:
         round_dir = os.path.join(self.data_dir, "rounds", str(timestamp))
         os.makedirs(round_dir, exist_ok=True)
+        os.makedirs(os.path.join(round_dir, "predictions"), exist_ok=True)
+        os.makedirs(os.path.join(round_dir, "prediction-updates"), exist_ok=True)
         snapshot = {}
         live_dir = os.path.join(self.data_dir, "live")
         for fname in os.listdir(live_dir):
@@ -36,6 +38,14 @@ class RoundManager:
         snapshot["round_timestamp"] = timestamp
         snapshot_path = os.path.join(round_dir, "snapshot.json")
         atomic_write_json(snapshot_path, snapshot)
+        atomic_write_json(
+            os.path.join(self.data_dir, "live", "current-round.json"),
+            {
+                "round_timestamp": timestamp,
+                "snapshot_path": snapshot_path,
+                "frozen_at": snapshot["frozen_at"],
+            },
+        )
         self._current_round = timestamp
         logger.info(f"Froze snapshot for round {timestamp}")
         return snapshot_path
