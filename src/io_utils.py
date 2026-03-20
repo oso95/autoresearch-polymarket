@@ -2,7 +2,10 @@ import json
 import os
 import fcntl
 import tempfile
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 def atomic_write_json(path: str, data: dict) -> None:
@@ -36,15 +39,41 @@ def atomic_append_jsonl(path: str, record: dict) -> None:
             fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
+def atomic_write_jsonl(path: str, records: list[dict]) -> None:
+    parent = Path(path).parent
+    parent.mkdir(parents=True, exist_ok=True)
+    lock_path = parent / (Path(path).name + ".lock")
+    tmp_path = None
+    with open(lock_path, "w") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            fd, tmp_path = tempfile.mkstemp(prefix=Path(path).name + ".", suffix=".tmp", dir=parent)
+            with os.fdopen(fd, "w") as f:
+                for record in records:
+                    f.write(json.dumps(record, separators=(",", ":")) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, path)
+        except Exception:
+            if tmp_path and os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            raise
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 def read_jsonl(path: str) -> list[dict]:
     if not os.path.exists(path):
         return []
     results = []
     with open(path) as f:
-        for line in f:
+        for line_no, line in enumerate(f, 1):
             line = line.strip()
             if line:
-                results.append(json.loads(line))
+                try:
+                    results.append(json.loads(line))
+                except json.JSONDecodeError:
+                    logger.warning("Skipping malformed JSONL line in %s at line %s", path, line_no)
     return results
 
 

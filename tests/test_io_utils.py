@@ -1,8 +1,9 @@
 import json
+import logging
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from src.io_utils import atomic_write_json, atomic_append_jsonl, read_jsonl
+from src.io_utils import atomic_write_json, atomic_append_jsonl, atomic_write_jsonl, read_jsonl
 
 def test_atomic_write_json(tmp_path):
     path = tmp_path / "test.json"
@@ -33,6 +34,19 @@ def test_read_jsonl_empty(tmp_path):
 def test_read_jsonl_missing(tmp_path):
     path = tmp_path / "missing.jsonl"
     assert read_jsonl(str(path)) == []
+
+def test_read_jsonl_skips_malformed_lines(tmp_path, caplog):
+    path = tmp_path / "test.jsonl"
+    path.write_text('{"a":1}\n8,"revision":37}\n{"b":2}\n')
+    with caplog.at_level(logging.WARNING):
+        lines = read_jsonl(str(path))
+    assert lines == [{"a": 1}, {"b": 2}]
+    assert "Skipping malformed JSONL line" in caplog.text
+
+def test_atomic_write_jsonl(tmp_path):
+    path = tmp_path / "test.jsonl"
+    atomic_write_jsonl(str(path), [{"a": 1}, {"b": 2}])
+    assert read_jsonl(str(path)) == [{"a": 1}, {"b": 2}]
 
 def test_atomic_write_json_concurrent(tmp_path):
     path = tmp_path / "shared.json"

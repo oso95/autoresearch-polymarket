@@ -4,7 +4,7 @@ import logging
 import time
 
 from src.codex_cli import DEFAULT_PREDICTION_MODEL, normalize_model_name
-from src.io_utils import atomic_append_jsonl, atomic_write_json, read_jsonl
+from src.io_utils import atomic_append_jsonl, atomic_write_json, atomic_write_jsonl, read_jsonl
 from src.memory_utils import read_memory_bundle
 from src.runner.paper_execution import score_execution
 
@@ -162,12 +162,7 @@ class AgentRunner:
         return status
 
     def _write_predictions_file(self, path: str, records: list[dict]) -> None:
-        tmp_path = path + ".tmp"
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(tmp_path, "w") as f:
-            for record in records:
-                f.write(json.dumps(record, separators=(",", ":")) + "\n")
-        os.rename(tmp_path, path)
+        atomic_write_jsonl(path, records)
 
     def refresh_shared_ledger(self) -> dict:
         agents = []
