@@ -2,20 +2,25 @@
 
 [English](README.md) | [繁體中文](README.zh-TW.md)
 
-Autonomous strategy discovery for Polymarket BTC 5-minute markets.
+A proof-of-concept applying the [autoresearch](https://github.com/uditgoenka/autoresearch) architecture — a Claude-based fork of Karpathy's [autoresearch](https://github.com/karpathy/autoresearch) — to a real-world use case: Polymarket BTC 5-minute prediction markets.
 
-This repo runs a local tournament of agents that:
+This project demonstrates how autonomous agents can collaborate through a shared knowledge system, evolve strategies via tournament selection, and improve over time without human intervention. Polymarket serves as the live feedback loop for validating the architecture.
 
-- read live and historical market data
-- make `Up` / `Down` predictions
-- evolve their strategies over time
-- backtest, clone, mirror, and ensemble top performers
-
-> **Disclaimer:** This is a proof of concept for research and educational purposes only. Use at your own risk. The authors are not responsible for any financial losses. Past performance does not guarantee future results.
+> **This is not a trading tool.** It is a research prototype proving that the autoresearch multi-agent architecture works in practice. The benchmark results below exist solely to demonstrate a functioning system, not to encourage trading.
 
 > **Token Usage Warning:** This system invokes LLM calls (Codex/Claude) continuously — once per agent per 5-minute round, plus evolution, backtesting, and coordination calls. Expect significant API token consumption. Monitor your usage and billing closely.
 
 > **VPN Required:** Polymarket and Binance restrict access from certain countries and regions. If you are in a restricted area, you will need a VPN to use this system. Check the [Polymarket Terms of Service](https://polymarket.com/tos) and [Binance regional availability](https://www.binance.com/en/support) for details.
+
+## Architecture
+
+The system implements several autoresearch patterns:
+
+- **Multi-agent tournament** — agents compete, and underperformers are replaced
+- **Shared knowledge base** — agents publish discoveries that other agents can read and build on
+- **Strategy evolution** — LLM-driven mutation of agent strategies based on performance data
+- **Clone, mirror, and ensemble** — top performers are duplicated, inverted, or combined
+- **Backtesting and fast evolution** — offline loops accelerate strategy discovery
 
 ## Requirements
 
@@ -102,9 +107,9 @@ See [`config.example.json`](config.example.json) for a complete example config. 
 cp config.example.json config.json
 ```
 
-## Benchmark Results
+## Proof of Working System
 
-Live trading results from March 18–21, 2026 on Polymarket BTC 5-minute Up/Down markets using Codex (GPT-5.4). Raw transaction history is in [`Polymarket-History-2026-04-06.csv`](Polymarket-History-2026-04-06.csv).
+Live results from March 18–21, 2026 on Polymarket BTC 5-minute Up/Down markets using Codex (GPT-5.4). These results demonstrate that the architecture produces a functioning autonomous system, not that it is a reliable trading strategy. Raw transaction history is in [`Polymarket-History-2026-04-06.csv`](Polymarket-History-2026-04-06.csv).
 
 | Metric | Value |
 |--------|-------|
@@ -114,8 +119,6 @@ Live trading results from March 18–21, 2026 on Polymarket BTC 5-minute Up/Down
 | Total returned | $257.26 |
 | Net P&L | **+$73.52** |
 | ROI | **+40.0%** |
-
-The system's edge comes from entry pricing and position sizing rather than raw directional accuracy — wins are significantly larger than losses.
 
 ## Testing
 
@@ -139,6 +142,11 @@ See [`examples/README.md`](examples/README.md) for checked-in example projects s
 | [`strategy_factory.py`](strategy_factory.py) | Continuous optimization loop |
 | [`paper_returns.py`](paper_returns.py) | Paper-trading P&L summary |
 | [`autoresearch_local.py`](autoresearch_local.py) | Local entrypoint |
+
+## Acknowledgements
+
+- [karpathy/autoresearch](https://github.com/karpathy/autoresearch) — original autoresearch concept
+- [uditgoenka/autoresearch](https://github.com/uditgoenka/autoresearch) — Claude-based fork this project builds on
 
 ## License
 
