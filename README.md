@@ -12,15 +12,62 @@ This project demonstrates how autonomous agents can collaborate through a shared
 
 > **VPN Required:** Polymarket and Binance restrict access from certain countries and regions. If you are in a restricted area, you will need a VPN to use this system. Check the [Polymarket Terms of Service](https://polymarket.com/tos) and [Binance regional availability](https://www.binance.com/en/support) for details.
 
-## Architecture
+## How It Works
 
-The system implements several autoresearch patterns:
+The system runs a continuous loop: agents make predictions, get scored against real outcomes, evolve their strategies, and share what they learn — all autonomously.
 
-- **Multi-agent tournament** — agents compete, and underperformers are replaced
-- **Shared knowledge base** — agents publish discoveries that other agents can read and build on
-- **Strategy evolution** — LLM-driven mutation of agent strategies based on performance data
-- **Clone, mirror, and ensemble** — top performers are duplicated, inverted, or combined
-- **Backtesting and fast evolution** — offline loops accelerate strategy discovery
+```
+┌─────────────────────────────────────────────────────────┐
+│                   ORCHESTRATION LOOP                    │
+│                                                         │
+│  ┌──────────┐   ┌──────────┐   ┌──────────┐            │
+│  │  DETECT  │──▶│ PREDICT  │──▶│  SCORE   │            │
+│  │  ROUND   │   │ (agents) │   │ (outcome)│            │
+│  └──────────┘   └──────────┘   └────┬─────┘            │
+│                                     │                   │
+│       ┌─────────────────────────────┘                   │
+│       ▼                                                 │
+│  ┌──────────┐   ┌──────────┐   ┌──────────┐            │
+│  │  EVOLVE  │──▶│TOURNAMENT│──▶│  REPEAT  │            │
+│  │(策略演化) │   │(淘汰/複製)│   │          │            │
+│  └──────────┘   └──────────┘   └──────────┘            │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Shared Knowledge Forum
+
+Agents don't just compete — they collaborate through a shared knowledge forum where they can:
+
+- **Post discoveries** — after evolving, agents publish insights (e.g. "bearish bias in Asian session hours")
+- **Upvote / downvote posts** — agents vote on each other's ideas based on their own experience
+- **Comment on posts** — agents discuss and build on each other's findings
+- Posts are ranked by score and surfaced to all agents during evolution, so high-quality ideas propagate across the population
+
+### Tournament Selection
+
+The population is under constant evolutionary pressure:
+
+- **Kill** — agents below 30% win rate after screening are removed; sustained underperformers (below 45%) are culled
+- **Clone** — top 2-3 agents are cloned with diverse mutations (e.g. "try more aggressive thresholds", "add time-of-day weighting")
+- **Mirror** — agents with extremely low win rates (<40%) get inverted — if an agent is consistently wrong, its mirror should be consistently right
+- **Ensemble** — top agents are combined into voting ensembles
+- **Seed** — when population drops, new agents are spawned from 16 seed strategies (including unconventional ones like Yi Jing oracle, Fibonacci spiral, and crowd psychology)
+
+### Strategy Evolution
+
+Every K rounds, agents enter an evolution cycle:
+
+1. **Review** — read own results, shared knowledge forum, leaderboard, and decision quality profile
+2. **Ideate** — identify what patterns wins/losses share, what top agents do differently
+3. **Modify** — rewrite strategy and prediction scripts via LLM
+4. **Test** — evaluate new strategy over next 5 rounds
+5. **Keep or discard** — if win rate improves, keep the change; if it declines, auto-revert
+
+Each agent maintains a memory chain of all evolution attempts (kept and discarded) so it learns from its own history.
+
+### Fast-Fail Safety
+
+If an evolved strategy causes 3+ consecutive losses, the system automatically reverts to the previous working version — allowing aggressive exploration with guardrails.
 
 ## Requirements
 
