@@ -4,7 +4,7 @@ Fast Evolution Loop — accelerate strategy discovery using backtesting.
 
 Instead of waiting 5 minutes per round in live trading, this loop:
 1. Backtests agent on TRAIN set → baseline win rate
-2. Evolves strategy via Codex/GPT
+2. Evolves strategy via the configured model runtime
 3. Backtests evolved strategy on TRAIN set → new win rate
 4. Validates on TEST set → check for overfitting
 5. Keep if better + not overfit, revert if worse
@@ -106,7 +106,7 @@ async def fast_evolve_agent(
         history.append(baseline)
 
         # Step 3: Evolve strategy
-        logger.info(f"  Step 3: Evolving strategy via Codex/GPT...")
+        logger.info(f"  Step 3: Evolving strategy via the configured model runtime...")
         evo_result = await evolver.evolve_agent(agent_name)
         if not evo_result:
             logger.warning(f"  Evolution failed, keeping current strategy")

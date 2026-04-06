@@ -20,6 +20,7 @@ Usage:
 """
 import argparse
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -54,7 +55,7 @@ async def main():
     parser.add_argument("--timeout", type=int, default=90,
                         help="Prediction timeout in seconds (default: 90)")
     parser.add_argument("--batch-size", type=int, default=10,
-                        help="Rounds per Codex/GPT call in batch mode (default: 10, use 1 for single mode)")
+                        help="Rounds per model call in batch mode (default: 10, use 1 for single mode)")
     parser.add_argument("--output", default=None,
                         help="Output JSON file path (default: live-run/data/backtest-results.json)")
     args = parser.parse_args()

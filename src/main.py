@@ -22,6 +22,8 @@ from src.runner.evolver import StrategyEvolver
 from src.runner.paper_execution import build_execution_quote, build_live_execution_quote
 from src.io_utils import read_jsonl, read_jsonl_tail
 from src.memory_utils import read_memory_bundle
+from src.runner.decision_tracker import build_decision_context_for_agent
+from src.runner.outcome_analyzer import build_outcome_context
 from src.shared_knowledge import build_shared_knowledge_context, ensure_shared_knowledge_forum
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
@@ -280,6 +282,17 @@ async def _invoke_single_agent(
         shared_context = build_shared_knowledge_context(shared_knowledge_dir, agent_name)
         if shared_context.strip():
             notes += "\n\n" + shared_context
+
+    # Add decision quality profile (revision accuracy, flip analysis)
+    decision_context = build_decision_context_for_agent(agents_dir, agent_name)
+    if decision_context:
+        notes += "\n\n" + decision_context
+
+    # Add outcome pattern analysis (autocorrelation, time-of-day patterns)
+    data_dir_for_outcome = os.path.dirname(shared_knowledge_dir)  # data_dir
+    outcome_context = build_outcome_context(data_dir_for_outcome)
+    if outcome_context:
+        notes += "\n\n" + outcome_context
 
     # Recent results summary (use tail read for efficiency — only need last 20)
     preds = read_jsonl_tail(os.path.join(agent_dir, "predictions.jsonl"), 20)

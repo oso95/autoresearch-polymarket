@@ -306,7 +306,7 @@ class Predictor:
             return None
 
     async def get_batch_predictions(self, agent_dir: str, strategy: str, snapshots: list[dict], scripts: dict, notes: str, model: str | None = None) -> list[dict | None]:
-        """Get predictions for multiple rounds in a single Codex call.
+        """Get predictions for multiple rounds in a single model call.
 
         Returns a list of prediction dicts (or None for failed parses), one per snapshot.
         Much faster than calling get_prediction() N times due to reduced CLI overhead.

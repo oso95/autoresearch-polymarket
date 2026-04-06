@@ -15,6 +15,10 @@ def summarize_agent(agent_dir: str) -> dict | None:
         return None
     total = len(executions)
     wins = sum(1 for e in executions if e.get("correct"))
+    total_cost = sum(float(e.get("entry_price", 0.0)) for e in executions)
+    total_payout = sum(float(e.get("payout", 0.0)) for e in executions)
+    total_pnl = total_payout - total_cost
+    total_return_pct = (total_pnl / total_cost) if total_cost else 0.0
     avg_return = sum(float(e.get("return_pct", 0.0)) for e in executions) / total
     avg_pnl = sum(float(e.get("pnl_per_share", 0.0)) for e in executions) / total
     return {
@@ -22,6 +26,10 @@ def summarize_agent(agent_dir: str) -> dict | None:
         "trades": total,
         "wins": wins,
         "win_rate": wins / total,
+        "total_cost": total_cost,
+        "total_payout": total_payout,
+        "total_pnl": total_pnl,
+        "total_return_pct": total_return_pct,
         "avg_return_pct": avg_return,
         "avg_pnl_per_share": avg_pnl,
         "last_market": executions[-1].get("market_slug"),
@@ -43,8 +51,26 @@ def main():
         if summary:
             rows.append(summary)
 
-    rows.sort(key=lambda r: (r["avg_return_pct"], r["win_rate"]), reverse=True)
-    print(json.dumps({"agents": rows}, indent=2))
+    rows.sort(key=lambda r: (r["total_return_pct"], r["total_pnl"], r["win_rate"]), reverse=True)
+    portfolio = {
+        "agents": len(rows),
+        "trades": sum(r["trades"] for r in rows),
+        "wins": sum(r["wins"] for r in rows),
+        "win_rate": (
+            sum(r["wins"] for r in rows) / sum(r["trades"] for r in rows)
+            if rows and sum(r["trades"] for r in rows)
+            else 0.0
+        ),
+        "total_cost": sum(r["total_cost"] for r in rows),
+        "total_payout": sum(r["total_payout"] for r in rows),
+        "total_pnl": sum(r["total_pnl"] for r in rows),
+    }
+    portfolio["total_return_pct"] = (
+        portfolio["total_pnl"] / portfolio["total_cost"]
+        if portfolio["total_cost"]
+        else 0.0
+    )
+    print(json.dumps({"portfolio": portfolio, "agents": rows}, indent=2))
 
 
 if __name__ == "__main__":

@@ -138,7 +138,7 @@ class Backtester:
     ) -> dict:
         """Run a single agent through historical rounds using batch prediction.
 
-        batch_size: number of rounds per Codex/GPT call. Higher = faster but less accurate
+        batch_size: number of rounds per model call. Higher = faster but less accurate
         (the model has to process more data per call). 10 is a good balance.
         Set to 1 for single-round mode (slower but matches live behavior exactly).
         """
@@ -170,7 +170,7 @@ class Backtester:
         predictions = []
 
         if batch_size > 1:
-            # BATCH MODE: send multiple snapshots per Codex/GPT call (much faster)
+            # BATCH MODE: send multiple snapshots per model call (much faster)
             batches = [rounds[i:i+batch_size] for i in range(0, len(rounds), batch_size)]
             sem = asyncio.Semaphore(self.concurrency)
 
@@ -214,7 +214,7 @@ class Backtester:
                         "reasoning": result.get("reasoning", "")[:100],
                     })
         else:
-            # SINGLE MODE: one Codex/GPT call per round (slower, matches live exactly)
+            # SINGLE MODE: one model call per round (slower, matches live exactly)
             sem = asyncio.Semaphore(self.concurrency)
 
             async def _predict_single(round_data: dict):

@@ -35,6 +35,8 @@ from src.memory_utils import (
     read_memory_bundle,
     set_current_memory_version,
 )
+from src.runner.agent_correlation import build_correlation_context
+from src.runner.decision_tracker import build_decision_context_for_agent
 from src.shared_knowledge import SharedKnowledgeForum, build_shared_knowledge_context, ensure_shared_knowledge_forum
 
 logger = logging.getLogger(__name__)
@@ -48,6 +50,8 @@ def _build_evolution_prompt(
     notes: str,
     shared_ledger_summary: str,
     leaderboard_summary: str,
+    decision_profile: str = "",
+    correlation_context: str = "",
 ) -> str:
     # Build win/loss record
     scored = [p for p in predictions if p.get("correct") is not None]
@@ -100,6 +104,12 @@ def _build_evolution_prompt(
     if leaderboard_summary:
         parts.extend(["## Tournament Leaderboard", leaderboard_summary, ""])
 
+    if decision_profile:
+        parts.extend([decision_profile, ""])
+
+    if correlation_context:
+        parts.extend([correlation_context, ""])
+
     parts.extend([
         "## Your Task: EVOLVE",
         "",
@@ -109,6 +119,7 @@ def _build_evolution_prompt(
         "- Are my thresholds too aggressive or too conservative?",
         "- Did the coordinator suggest anything worth trying?",
         "- What are the top-performing agents doing differently?",
+        "- What does my Decision Quality Profile tell me about my prediction timing?",
         "",
         "Then make **ONE focused change** to improve your strategy.",
         "This could be:",
@@ -412,10 +423,13 @@ class StrategyEvolver:
         # Build context
         shared_summary = _build_shared_ledger_summary(self.agents_dir, agent_name)
         lb_summary = _build_leaderboard_summary(self.data_dir)
+        decision_profile = build_decision_context_for_agent(self.agents_dir, agent_name)
+        correlation_context = build_correlation_context(self.agents_dir)
 
         prompt = _build_evolution_prompt(
             agent_name, strategy, scripts, predictions,
-            notes, shared_summary, lb_summary,
+            notes, shared_summary, lb_summary, decision_profile,
+            correlation_context,
         )
 
         try:
