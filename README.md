@@ -96,6 +96,21 @@ See [`config.example.json`](config.example.json) for a complete example config. 
 cp config.example.json config.json
 ```
 
+## Benchmark Results
+
+Live trading results from March 18–21, 2026 on Polymarket BTC 5-minute Up/Down markets using Codex (GPT-5.4). Raw transaction history is in [`Polymarket-History-2026-04-06.csv`](Polymarket-History-2026-04-06.csv).
+
+| Metric | Value |
+|--------|-------|
+| Rounds traded | 16 |
+| Win rate | 43.8% (7W / 9L) |
+| Total deployed | $183.74 |
+| Total returned | $257.26 |
+| Net P&L | **+$73.52** |
+| ROI | **+40.0%** |
+
+The system's edge comes from entry pricing and position sizing rather than raw directional accuracy — wins are significantly larger than losses.
+
 ## Testing
 
 ```bash
