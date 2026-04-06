@@ -1,5 +1,7 @@
 # Autoresearch Polymarket
 
+[English](README.md) | [繁體中文](README.zh-TW.md)
+
 Autonomous strategy discovery for Polymarket BTC 5-minute markets.
 
 This repo runs a local tournament of agents that:
