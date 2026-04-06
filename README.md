@@ -11,6 +11,10 @@ This repo runs a local tournament of agents that:
 - evolve their strategies over time
 - backtest, clone, mirror, and ensemble top performers
 
+> **Disclaimer:** This is a proof of concept for research and educational purposes only. Use at your own risk. The authors are not responsible for any financial losses. Past performance does not guarantee future results.
+
+> **Token Usage Warning:** This system invokes LLM calls (Codex/Claude) continuously — once per agent per 5-minute round, plus evolution, backtesting, and coordination calls. Expect significant API token consumption. Monitor your usage and billing closely.
+
 > **VPN Required:** Polymarket and Binance restrict access from certain countries and regions. If you are in a restricted area, you will need a VPN to use this system. Check the [Polymarket Terms of Service](https://polymarket.com/tos) and [Binance regional availability](https://www.binance.com/en/support) for details.
 
 ## Requirements

@@ -11,6 +11,10 @@
 - 隨時間演化策略
 - 回測、複製、鏡像並集成表現最佳的策略
 
+> **免責聲明：** 本專案僅為概念驗證（POC），供研究與教育用途。使用風險自負。作者不對任何財務損失負責。過去的表現不保證未來的結果。
+
+> **Token 用量警告：** 本系統會持續呼叫 LLM（Codex/Claude）— 每個代理人每 5 分鐘回合呼叫一次，加上演化、回測和協調呼叫。預期會產生大量 API token 消耗。請密切關注你的用量與帳單。
+
 > **需要 VPN：** Polymarket 和 Binance 在部分國家和地區限制存取。如果你在受限區域，需要使用 VPN 才能使用本系統。詳情請參閱 [Polymarket 服務條款](https://polymarket.com/tos) 和 [Binance 地區可用性](https://www.binance.com/en/support)。
 
 ## 系統需求
